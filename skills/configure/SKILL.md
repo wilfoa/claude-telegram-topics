@@ -46,12 +46,18 @@ Read state files and show a complete picture:
 6. **Daemon** — check `~/.claude/channels/telegram-topics/daemon.pid`. If
    present, check if process is alive via `kill -0 <pid>`.
 
-7. **What next** — guide based on state:
+7. **What next** — guide based on state. Pairing is required: default
+   `dmPolicy` is `pairing`, and the gate drops every message from a sender
+   who isn't in `allowFrom`. Until the user pairs, nothing reaches Claude.
    - No token → "Run `/telegram-topics:configure <token>` with the token from BotFather."
-   - No chat ID → "Run `/telegram-topics:configure chat auto` after adding the bot to your supergroup."
-   - Ready → "Start with `claude --channels plugin:telegram-topics@...`"
-
-Push toward lockdown after pairing is complete.
+   - No chat ID → "Run `/telegram-topics:configure chat <id>` with your supergroup's chat ID (negative number)."
+   - Token + chat ID set, `allowFrom` empty → full remaining flow:
+     1. Start Claude Code in a project with `--dangerously-load-development-channels plugin:telegram-topics@wilfoa-plugins`.
+     2. In Telegram, send any message in the new topic. The bot replies with a 6-character pairing code.
+     3. Run `/telegram-topics:pair <code>` to add your Telegram user to the allowlist.
+     4. Run `/telegram-topics:access policy allowlist` to close the pairing window.
+   - Paired (`allowFrom` non-empty) but `dmPolicy` still `pairing` → "Lock down with `/telegram-topics:access policy allowlist`."
+   - Fully configured and locked down → "You're set. Start a session in any project with `--dangerously-load-development-channels plugin:telegram-topics@wilfoa-plugins`."
 
 ### `<token>` — save bot token
 
