@@ -207,15 +207,17 @@ function handleDaemonMessage(msg: DaemonMessage): void {
     }
 
     case 'inbound': {
-      // Forward to Claude Code as MCP notification
-      const params: Record<string, unknown> = {
-        source: 'telegram-topics',
-        content: msg.content,
-        ...msg.meta,
-      }
+      // Forward to Claude Code as MCP notification.
+      // Spec: params = { content, meta: {...} }. The `source` attribute is set
+      // automatically by Claude Code from the server name, so we don't send it.
+      // Meta keys must be identifier-safe (letters, digits, underscores only) —
+      // Claude Code silently drops others.
       server.notification({
         method: 'notifications/claude/channel',
-        params,
+        params: {
+          content: msg.content,
+          meta: msg.meta,
+        },
       }).catch(err => {
         process.stderr.write(`telegram-topics shim: failed to send inbound notification: ${err}\n`)
       })

@@ -1,6 +1,6 @@
 {
   "name": "telegram-topics",
   "description": "Telegram channel for Claude Code with Forum Topics — each project gets its own topic thread. Manage pairing, allowlists, and topic naming via plugin commands.",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "keywords": ["telegram", "topics", "messaging", "channel", "mcp"]
 }
