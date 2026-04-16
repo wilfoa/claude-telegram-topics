@@ -33,7 +33,7 @@ import {
   serialize,
 } from './protocol'
 
-import { loadLabels, loadTopics, readPid, DEFAULT_STATE_DIR } from './state'
+import { loadLabels, loadTopics, readPid, clearPid, DEFAULT_STATE_DIR } from './state'
 
 // ---------------------------------------------------------------------------
 // Configuration
