@@ -33,7 +33,7 @@ import {
   serialize,
 } from './protocol'
 
-import { loadTopics, readPid, DEFAULT_STATE_DIR } from './state'
+import { loadLabels, loadTopics, readPid, DEFAULT_STATE_DIR } from './state'
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -75,6 +75,12 @@ loadEnv()
 
 function resolveTopicLabel(): string {
   const cwd = process.cwd()
+  // User-configured label takes priority — set via /telegram-topics:configure topic
+  const labels = loadLabels(STATE_DIR)
+  if (labels[cwd]) {
+    return labels[cwd]
+  }
+  // Fall back to previously-created topic name, then directory basename
   const topics = loadTopics(STATE_DIR)
   if (topics[cwd]?.topicName) {
     return topics[cwd].topicName
@@ -489,19 +495,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 server.fallbackNotificationHandler = async (notification) => {
   if (notification.method === 'notifications/claude/channel/permission_request') {
+    // Claude Code sends snake_case fields per the channels-reference spec.
     const params = notification.params as {
-      requestId: string
-      toolName: string
+      request_id: string
+      tool_name: string
       description: string
-      inputPreview: string
+      input_preview: string
     }
     try {
       sendToDaemon({
         type: 'forward_permission_request',
-        requestId: params.requestId,
-        toolName: params.toolName,
+        requestId: params.request_id,
+        toolName: params.tool_name,
         description: params.description,
-        inputPreview: params.inputPreview,
+        inputPreview: params.input_preview,
       })
     } catch (err) {
       process.stderr.write(`telegram-topics shim: failed to forward permission request: ${err}\n`)

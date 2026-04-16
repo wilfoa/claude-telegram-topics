@@ -34,14 +34,19 @@ Read state files and show a complete picture:
    `chatId`. Show set/not-set.
 
 3. **Topics** — read `~/.claude/channels/telegram-topics/topics.json`. List
-   project paths and their topic names.
+   project paths and their topic names (these are what the daemon has actually
+   created in Telegram).
 
-4. **Access** — read `access.json`. Show DM policy, allowed senders count.
+4. **Labels** — read `~/.claude/channels/telegram-topics/labels.json`. List
+   any user-configured label overrides. A label set here but not yet reflected
+   in `topics.json` means the rename is pending a session restart.
 
-5. **Daemon** — check `~/.claude/channels/telegram-topics/daemon.pid`. If
+5. **Access** — read `access.json`. Show DM policy, allowed senders count.
+
+6. **Daemon** — check `~/.claude/channels/telegram-topics/daemon.pid`. If
    present, check if process is alive via `kill -0 <pid>`.
 
-6. **What next** — guide based on state:
+7. **What next** — guide based on state:
    - No token → "Run `/telegram-topics:configure <token>` with the token from BotFather."
    - No chat ID → "Run `/telegram-topics:configure chat auto` after adding the bot to your supergroup."
    - Ready → "Start with `claude --channels plugin:telegram-topics@...`"
@@ -75,12 +80,20 @@ Delete the `CLAUDE_TELEGRAM_TOPICS_BOT_TOKEN=` line from `.env`.
 
 ### `topic <name>` — set topic name for current project
 
-1. Read `~/.claude/channels/telegram-topics/topics.json` (create `{}` if missing).
-2. Get current working directory path.
-3. Set or update the entry for cwd. If existing, preserve `topicId` and only update `topicName`.
-   If no entry exists, set `topicId` to 0 (will be created on next connect).
-4. Write back.
-5. Confirm: "Topic name for this project set to '<name>'. It will be created/renamed on next connect."
+The user's preferred label lives in a **separate `labels.json` file** (not `topics.json`).
+This keeps it independent of the daemon's tracked state. If the skill wrote to `topics.json`
+directly, the daemon would see the name already matches and skip the `editForumTopic` call,
+so the actual Telegram topic would never rename.
+
+1. Read `~/.claude/channels/telegram-topics/labels.json` (create `{}` if missing).
+2. Get the current working directory path (this is the key).
+3. Set `labels[cwd] = "<name>"`.
+4. Write back with `chmod 600`.
+5. Confirm: "Topic label for this project set to '<name>'. It will be created or renamed on next session restart."
+
+Note: the rename happens when the shim next connects to the daemon (i.e. next Claude Code
+session with `--channels`). If Claude Code is currently running, exit and restart for the
+change to take effect.
 
 ---
 

@@ -83,6 +83,32 @@ export function saveTopics(topics: TopicMap, stateDir = DEFAULT_STATE_DIR): void
   renameSync(tmp, file)
 }
 
+// --- Labels (user-configured topic names) ---
+//
+// labels.json is written ONLY by the /telegram-topics:configure topic skill.
+// topics.json is written ONLY by the daemon (to track what Telegram has).
+// This separation prevents the skill from accidentally making the daemon think
+// a rename already happened (which would skip the actual editForumTopic call).
+
+export type LabelsMap = Record<string, string>
+
+export function loadLabels(stateDir = DEFAULT_STATE_DIR): LabelsMap {
+  const file = join(stateDir, 'labels.json')
+  try {
+    return JSON.parse(readFileSync(file, 'utf8')) as LabelsMap
+  } catch {
+    return {}
+  }
+}
+
+export function saveLabels(labels: LabelsMap, stateDir = DEFAULT_STATE_DIR): void {
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 })
+  const file = join(stateDir, 'labels.json')
+  const tmp = file + '.tmp'
+  writeFileSync(tmp, JSON.stringify(labels, null, 2) + '\n', { mode: 0o600 })
+  renameSync(tmp, file)
+}
+
 // --- Token (.env) ---
 
 export function loadToken(stateDir = DEFAULT_STATE_DIR): string | undefined {
