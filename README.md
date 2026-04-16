@@ -146,7 +146,9 @@ This writes to `~/.claude/channels/telegram-topics/labels.json`. On the next Cla
 | `/telegram-topics:configure clear` | Remove the stored token |
 | `/telegram-topics:configure chat <id>` | Set the supergroup chat ID |
 | `/telegram-topics:configure topic <name>` | Set a custom topic name for the current project |
-| `/telegram-topics:access pair <code>` | Approve a pairing code |
+| `/telegram-topics:help` | Show command list and the first-run checklist |
+| `/telegram-topics:pair <code>` | Approve a pairing code (shortcut) |
+| `/telegram-topics:access pair <code>` | Same, via the access skill |
 | `/telegram-topics:access deny <code>` | Reject a pending pairing code |
 | `/telegram-topics:access allow <senderId>` | Manually add a Telegram user to the allowlist |
 | `/telegram-topics:access remove <senderId>` | Remove a user from the allowlist |
