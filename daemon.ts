@@ -484,6 +484,10 @@ async function handleInbound(ctx: Context): Promise<void> {
   const chatId = String(ctx.chat!.id)
   const chatType = ctx.chat?.type
 
+  process.stderr.write(
+    `telegram-topics daemon: inbound chat=${chatId} type=${chatType} thread=${threadId ?? 'none'} sender=${senderId}\n`,
+  )
+
   // --- DM handling (commands, pairing) ---
   if (chatType === 'private') {
     await handleDM(ctx)
@@ -492,10 +496,16 @@ async function handleInbound(ctx: Context): Promise<void> {
 
   // --- Group/supergroup handling ---
   // Only handle messages in our configured chat
-  if (chatId !== CHAT_ID) return
+  if (chatId !== CHAT_ID) {
+    process.stderr.write(`telegram-topics daemon: drop — chat ${chatId} != configured ${CHAT_ID}\n`)
+    return
+  }
 
   // Only handle messages in topics (with message_thread_id)
-  if (threadId == null) return
+  if (threadId == null) {
+    process.stderr.write(`telegram-topics daemon: drop — no message_thread_id (not in a topic)\n`)
+    return
+  }
 
   // Gate the sender
   const currentAccess = loadAccess(STATE_DIR)
@@ -503,6 +513,9 @@ async function handleInbound(ctx: Context): Promise<void> {
   if (pruned) saveAccess(currentAccess, STATE_DIR)
 
   const gateResult = gate(senderId, currentAccess)
+  process.stderr.write(
+    `telegram-topics daemon: gate result for ${senderId} = ${gateResult.action} (policy=${currentAccess.dmPolicy}, allowFrom=[${currentAccess.allowFrom.join(',')}])\n`,
+  )
 
   if (gateResult.action === 'drop') return
 
@@ -517,6 +530,9 @@ async function handleInbound(ctx: Context): Promise<void> {
 
   // Sender is allowed — route to shim
   const shim = findShimByTopic(threadId)
+  process.stderr.write(
+    `telegram-topics daemon: routing topic=${threadId} → ${shim ? `shim for ${shim.projectPath ?? 'unknown'}` : 'NO SHIM'} (registered topics: [${Array.from(shimsByTopic.keys()).join(',')}])\n`,
+  )
   if (!shim) {
     // Rate-limited "no active session" reply
     const now = Date.now()

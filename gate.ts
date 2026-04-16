@@ -17,11 +17,14 @@ const MAX_PENDING = 3
 const MAX_REPLIES = 2
 
 export function gate(senderId: string, access: Access): GateResult {
-  if (access.dmPolicy === 'disabled') return { action: 'drop' }
-
+  // Allowlisted senders always deliver, regardless of policy
   if (access.allowFrom.includes(senderId)) return { action: 'deliver' }
 
-  if (access.dmPolicy === 'allowlist') return { action: 'drop' }
+  if (access.dmPolicy === 'disabled') return { action: 'drop' }
+
+  // Any value other than 'pairing' is treated as a closed allowlist.
+  // This covers 'allowlist' and any typo/unknown value (fail-safe default).
+  if (access.dmPolicy !== 'pairing') return { action: 'drop' }
 
   // pairing mode — check for existing code for this sender
   for (const [code, p] of Object.entries(access.pending)) {

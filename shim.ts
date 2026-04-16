@@ -292,9 +292,19 @@ function isDaemonRunning(): boolean {
 
 function spawnDaemon(): void {
   process.stderr.write(`telegram-topics shim: starting daemon\n`)
+  // Redirect daemon stdout/stderr to a log file for debugging. Keep stdin closed.
+  const logPath = join(STATE_DIR, 'daemon.log')
+  let logFd: number | 'ignore'
+  try {
+    // Open in append mode so logs accumulate across restarts.
+    const { openSync } = require('fs')
+    logFd = openSync(logPath, 'a')
+  } catch {
+    logFd = 'ignore'
+  }
   const child = spawn('bun', ['run', DAEMON_PATH], {
     detached: true,
-    stdio: 'ignore',
+    stdio: ['ignore', logFd, logFd],
     env: { ...process.env },
   })
   child.unref()
