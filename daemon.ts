@@ -943,7 +943,12 @@ void (async () => {
     try {
       await bot.start({
         onStart: info => {
-          attempt = 0
+          // Only reset the retry counter after polling has been stable for a
+          // while. If another daemon is fighting for this bot token, onStart
+          // fires successfully on every connect but a 409 throws almost
+          // immediately — resetting synchronously would prevent the 8-retry
+          // exit from ever tripping.
+          setTimeout(() => { if (!shuttingDown) attempt = 0 }, 10_000).unref()
           botUsername = info.username
           process.stderr.write(`telegram-topics daemon: polling as @${info.username}\n`)
           void bot.api.setMyCommands(

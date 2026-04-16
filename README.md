@@ -58,13 +58,20 @@ This plugin isn't on Anthropic's approved allowlist, so it runs under the develo
 
 ## Setup
 
-### 1. Create a Telegram bot
+Setup has two phases:
+
+- **One-time setup** (§1–5): create the bot, the supergroup, the chat ID, save them to Claude Code, pair your Telegram account. Do this exactly once per machine.
+- **Per-project setup** (§6): `cd` into the project and run Claude Code with the channel flag. The topic is created on first connect. Optionally rename it.
+
+### One-time setup
+
+#### 1. Create a Telegram bot
 
 Message [@BotFather](https://t.me/BotFather), run `/newbot`, pick a display name and a unique username ending in `bot`. Copy the token it returns.
 
 > **Important:** if you also run the official Telegram plugin, use a **different bot token** for `telegram-topics`. Telegram allows only one `getUpdates` poller per token; two daemons on the same token will throw `409 Conflict` forever.
 
-### 2. Create the supergroup with Topics enabled
+#### 2. Create the supergroup with Topics enabled
 
 - New Group → add any member (you can remove them later)
 - Convert to supergroup (Edit group → "Chat History for New Members: Visible")
@@ -72,20 +79,44 @@ Message [@BotFather](https://t.me/BotFather), run `/newbot`, pick a display name
 - Add your bot to the group
 - Promote the bot to admin with **Manage Topics** + **Post Messages** permissions
 
-### 3. Get the supergroup chat ID
+#### 3. Get the supergroup chat ID
 
 Forward any message from your supergroup to [@userinfobot](https://t.me/userinfobot). It returns the chat ID — a negative integer like `-1001234567890`.
 
-### 4. Configure the plugin
+#### 4. Save the token and chat ID
 
-In Claude Code:
+In Claude Code (any directory):
 
 ```
 /telegram-topics:configure <your-bot-token>
 /telegram-topics:configure chat -1001234567890
 ```
 
-### 5. Start a Claude Code session with channels enabled
+Both are stored under `~/.claude/channels/telegram-topics/` and shared across every project on this machine.
+
+#### 5. Pair your Telegram account
+
+Start a Claude Code session in any project directory:
+
+```bash
+cd ~/Development/anywhere
+claude --dangerously-load-development-channels plugin:telegram-topics@wilfoa-plugins
+```
+
+This auto-creates a Forum Topic for that project. In Telegram, open the new topic and send any message (e.g. "hi"). The bot replies with a 6-character pairing code.
+
+Back in Claude Code:
+
+```
+/telegram-topics:pair <code>
+/telegram-topics:access policy allowlist
+```
+
+Your Telegram user ID is now on the allowlist and the pairing window is closed. **You only pair once per Telegram account, not per project.** Every future topic for every future project will route messages from the same user straight through.
+
+### Per-project setup
+
+For each new project directory:
 
 ```bash
 cd ~/Development/my-project
@@ -98,44 +129,17 @@ On first connect, the daemon:
 - Creates a Forum Topic named `my-project` (the directory basename)
 - Stores the mapping in `~/.claude/channels/telegram-topics/topics.json`
 
-### 6. Pair your Telegram account
+That's it. Send a message in the new topic and Claude Code in that directory picks it up.
 
-In Telegram, go to the new topic and send any message (e.g. "hi"). The bot replies with a 6-character pairing code.
+#### Custom topic name
 
-Back in Claude Code:
-
-```
-/telegram-topics:access pair <code>
-/telegram-topics:access policy allowlist
-```
-
-Now your Telegram user ID is on the allowlist and the pairing window is closed.
-
-### 7. Test
-
-In Telegram, send a question in your topic:
-
-```
-what files are in this directory?
-```
-
-Claude should pick it up, run a command, and reply in the same topic.
-
-## Per-project setup
-
-Each new project directory gets its own topic automatically. The default topic name is `basename(cwd)`.
-
-To use a custom topic name:
-
-```bash
-cd ~/Development/general-dev
-```
+The default topic name is `basename(cwd)`. To override it, `cd` into the project **before** its first session and run:
 
 ```
 /telegram-topics:configure topic "General Dev"
 ```
 
-This writes to `~/.claude/channels/telegram-topics/labels.json`. On the next Claude Code session with `--channels`, the daemon creates or renames the topic to "General Dev" via `editForumTopic`.
+This writes to `~/.claude/channels/telegram-topics/labels.json`. On the next Claude Code session with `--channels`, the daemon creates the topic with that name (or renames an existing one via `editForumTopic`).
 
 ## Plugin commands
 

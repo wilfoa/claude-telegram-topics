@@ -33,7 +33,7 @@ import {
   serialize,
 } from './protocol'
 
-import { loadLabels, loadTopics, readPid, clearPid, DEFAULT_STATE_DIR } from './state'
+import { loadLabels, loadTopics, readPid, writePid, clearPid, DEFAULT_STATE_DIR } from './state'
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -290,20 +290,107 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+export type DaemonProcess = { pid: number; cmdline: string }
+
 /**
- * Return the full command line of a running PID, or null if it can't be read.
- * Used to detect whether the running daemon was launched from a different
- * plugin cache path (i.e. a stale version still running after /plugin update).
+ * Parse `ps ax -o pid=,args=` output into telegram-topics daemon processes.
+ * Pure helper so the stray-detection logic is testable without spawning ps.
+ * Excludes the shim's own PID.
  */
-function getPidCmdline(pid: number): string | null {
+export function parseDaemonsFromPs(psOutput: string, selfPid: number): DaemonProcess[] {
+  const results: DaemonProcess[] = []
+  for (const line of psOutput.split('\n')) {
+    const m = /^\s*(\d+)\s+(.+)$/.exec(line)
+    if (!m) continue
+    const pid = parseInt(m[1]!, 10)
+    if (pid === selfPid) continue
+    const cmdline = m[2]!.trim()
+    // Match cached plugin paths (.../telegram-topics/<ver>/daemon.ts) and
+    // local dev paths (.../telegram-topics/daemon.ts). Exclude shim.ts.
+    if (!/\btelegram-topics\b/.test(cmdline)) continue
+    if (!/\bdaemon\.ts\b/.test(cmdline)) continue
+    results.push({ pid, cmdline })
+  }
+  return results
+}
+
+/**
+ * Decide which daemon to keep when multiple are running.
+ * Prefer the one matching expectedPath; break ties with trackedPid.
+ * Returns null if none match expectedPath — caller should spawn fresh.
+ */
+export function selectDaemonToKeep(
+  daemons: DaemonProcess[],
+  expectedPath: string,
+  trackedPid: number | undefined,
+): number | null {
+  const matching = daemons.filter(d => d.cmdline.includes(expectedPath))
+  if (matching.length === 0) return null
+  if (trackedPid != null && matching.some(d => d.pid === trackedPid)) {
+    return trackedPid
+  }
+  // Highest PID is usually the newest start — fine heuristic when no tracked.
+  return matching.reduce((a, b) => (a.pid > b.pid ? a : b)).pid
+}
+
+function listAllDaemonPids(): DaemonProcess[] {
   try {
     const { execSync } = require('child_process')
-    // `args=` suppresses the header; works on both macOS and Linux.
-    const out = execSync(`ps -p ${pid} -o args=`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
-    return out.trim()
+    const out = execSync(`ps ax -o pid=,args=`, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    return parseDaemonsFromPs(out, process.pid)
   } catch {
-    return null
+    return []
   }
+}
+
+async function killPid(pid: number): Promise<void> {
+  try { process.kill(pid, 'SIGTERM') } catch {}
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 100))
+    if (!isPidAlive(pid)) return
+  }
+  try { process.kill(pid, 'SIGKILL') } catch {}
+  await new Promise(r => setTimeout(r, 200))
+}
+
+function removeSocketFile(): void {
+  try {
+    const { unlinkSync } = require('fs')
+    unlinkSync(SOCKET_PATH)
+  } catch {}
+}
+
+/**
+ * Kill any telegram-topics daemon that isn't the one we want to keep.
+ * Returns the PID we kept (or null if we need to spawn fresh).
+ *
+ * This handles the case where old daemons from prior plugin-cache versions
+ * (or a local dev checkout) are still polling the same bot token — that
+ * causes tight 409-Conflict loops and lost messages.
+ */
+async function killStrayDaemons(): Promise<number | null> {
+  const daemons = listAllDaemonPids()
+  if (daemons.length === 0) return null
+  const trackedPid = readPid(STATE_DIR)
+  const keepPid = selectDaemonToKeep(daemons, DAEMON_PATH, trackedPid)
+  const toKill = daemons.filter(d => d.pid !== keepPid)
+  if (toKill.length === 0) return keepPid
+  for (const { pid, cmdline } of toKill) {
+    process.stderr.write(`telegram-topics shim: killing stray daemon pid=${pid} cmd="${cmdline}"\n`)
+  }
+  await Promise.all(toKill.map(d => killPid(d.pid)))
+  if (keepPid == null) {
+    // No matching daemon left — clear artifacts so a fresh spawn starts clean.
+    removeSocketFile()
+    clearPid(STATE_DIR)
+  } else if (keepPid !== trackedPid) {
+    // We kept a matching daemon but daemon.pid pointed elsewhere — fix it.
+    writePid(keepPid, STATE_DIR)
+  }
+  return keepPid
 }
 
 /**
@@ -312,49 +399,9 @@ function getPidCmdline(pid: number): string | null {
  */
 async function killStaleDaemon(pid: number): Promise<void> {
   process.stderr.write(`telegram-topics shim: killing stale daemon pid=${pid}\n`)
-  try { process.kill(pid, 'SIGTERM') } catch {}
-  // Wait up to 3s for graceful shutdown.
-  for (let i = 0; i < 30; i++) {
-    await new Promise(r => setTimeout(r, 100))
-    if (!isPidAlive(pid)) break
-  }
-  // Force kill if still alive.
-  if (isPidAlive(pid)) {
-    try { process.kill(pid, 'SIGKILL') } catch {}
-    await new Promise(r => setTimeout(r, 200))
-  }
-  // Clean up leftover socket and pid files so the new daemon starts clean.
-  try {
-    const { unlinkSync } = require('fs')
-    unlinkSync(SOCKET_PATH)
-  } catch {}
+  await killPid(pid)
+  removeSocketFile()
   clearPid(STATE_DIR)
-}
-
-/**
- * Check daemon health. Returns 'running' if alive and matches our plugin path,
- * 'stale' if alive but from a different cache path (plugin was updated),
- * 'dead' if not running.
- */
-function checkDaemon(): 'running' | 'stale' | 'dead' {
-  const pid = readPid(STATE_DIR)
-  if (pid == null) return 'dead'
-  if (!isPidAlive(pid)) return 'dead'
-  // Daemon is alive — check if it's from the same plugin cache path as us.
-  const cmdline = getPidCmdline(pid)
-  if (cmdline == null) {
-    // Can't read cmdline — assume it's fine (benefit of the doubt).
-    return 'running'
-  }
-  // DAEMON_PATH is our plugin's daemon.ts path. If the running daemon's cmdline
-  // doesn't contain it, the daemon is from an older/different plugin cache.
-  if (!cmdline.includes(DAEMON_PATH)) {
-    process.stderr.write(
-      `telegram-topics shim: daemon cmdline "${cmdline}" does not match expected "${DAEMON_PATH}" — stale\n`,
-    )
-    return 'stale'
-  }
-  return 'running'
 }
 
 function spawnDaemon(): void {
@@ -387,11 +434,18 @@ async function waitForSocket(timeoutMs = 5000, intervalMs = 100): Promise<void> 
 }
 
 async function ensureDaemon(): Promise<void> {
-  const status = checkDaemon()
-  if (status === 'running' && existsSync(SOCKET_PATH)) return
-  if (status === 'stale') {
-    const pid = readPid(STATE_DIR)!
-    await killStaleDaemon(pid)
+  // Scan for any telegram-topics daemons on the system and kill any that
+  // aren't the one we expect. This is the only way to recover from leftover
+  // daemons from older plugin-cache versions or a local dev checkout — they
+  // all poll the same bot token and cause tight 409-Conflict loops otherwise.
+  const keepPid = await killStrayDaemons()
+
+  if (keepPid != null && isPidAlive(keepPid) && existsSync(SOCKET_PATH)) {
+    return
+  }
+  // Matching daemon exists but socket is gone — kill it too and spawn fresh.
+  if (keepPid != null) {
+    await killStaleDaemon(keepPid)
   }
   spawnDaemon()
   await waitForSocket()
@@ -629,12 +683,13 @@ function shutdown(): void {
   setTimeout(() => process.exit(0), 2000).unref()
 }
 
-process.on('SIGTERM', shutdown)
-process.on('SIGINT', shutdown)
-
-// Detect stdin close (Claude Code exited)
-process.stdin.on('close', shutdown)
-process.stdin.on('end', shutdown)
+function registerShutdownHandlers(): void {
+  process.on('SIGTERM', shutdown)
+  process.on('SIGINT', shutdown)
+  // Detect stdin close (Claude Code exited)
+  process.stdin.on('close', shutdown)
+  process.stdin.on('end', shutdown)
+}
 
 // ---------------------------------------------------------------------------
 // Main
@@ -642,6 +697,8 @@ process.stdin.on('end', shutdown)
 
 async function main(): Promise<void> {
   process.stderr.write('telegram-topics shim: starting\n')
+
+  registerShutdownHandlers()
 
   // Ensure daemon is running and connect
   try {
@@ -659,7 +716,11 @@ async function main(): Promise<void> {
   process.stderr.write('telegram-topics shim: MCP server running on stdio\n')
 }
 
-main().catch(err => {
-  process.stderr.write(`telegram-topics shim: fatal error: ${err}\n`)
-  process.exit(1)
-})
+// Guard so tests can import the module (for exported pure helpers) without
+// kicking off the daemon-spawn / socket-connect side effects.
+if (import.meta.main) {
+  main().catch(err => {
+    process.stderr.write(`telegram-topics shim: fatal error: ${err}\n`)
+    process.exit(1)
+  })
+}

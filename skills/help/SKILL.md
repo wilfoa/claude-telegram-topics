@@ -59,7 +59,8 @@ Daemon:
    Sets a custom label so the topic is created with that name on first run.
 8. Exit Claude Code, restart with:
       claude --dangerously-load-development-channels plugin:telegram-topics@wilfoa-plugins
-9. In Telegram, send any message in a topic.
+9. In Telegram, go to the new topic (named after your project dir,
+   or whatever you set in step 7) and send any message (e.g. "hi").
 10. Bot replies with a 6-char pairing code.
 11. /telegram-topics:pair <code>
 12. /telegram-topics:access policy allowlist
