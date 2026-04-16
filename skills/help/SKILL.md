@@ -54,12 +54,15 @@ Daemon:
 4. Forward a message from the group to @userinfobot to get the chat ID.
 5. /telegram-topics:configure <token>
 6. /telegram-topics:configure chat <chat_id>
-7. Exit Claude Code, restart with:
+7. (Optional) cd into your project, then:
+      /telegram-topics:configure topic "<name>"
+   Sets a custom label so the topic is created with that name on first run.
+8. Exit Claude Code, restart with:
       claude --dangerously-load-development-channels plugin:telegram-topics@wilfoa-plugins
-8. In Telegram, send any message in a topic.
-9. Bot replies with a 6-char pairing code.
-10. /telegram-topics:pair <code>
-11. /telegram-topics:access policy allowlist
+9. In Telegram, send any message in a topic.
+10. Bot replies with a 6-char pairing code.
+11. /telegram-topics:pair <code>
+12. /telegram-topics:access policy allowlist
 
 ----- Repo -----
 
