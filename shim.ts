@@ -281,15 +281,80 @@ function handleDaemonMessage(msg: DaemonMessage): void {
 // Daemon auto-start
 // ---------------------------------------------------------------------------
 
-function isDaemonRunning(): boolean {
-  const pid = readPid(STATE_DIR)
-  if (pid == null) return false
+function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0)
     return true
   } catch {
     return false
   }
+}
+
+/**
+ * Return the full command line of a running PID, or null if it can't be read.
+ * Used to detect whether the running daemon was launched from a different
+ * plugin cache path (i.e. a stale version still running after /plugin update).
+ */
+function getPidCmdline(pid: number): string | null {
+  try {
+    const { execSync } = require('child_process')
+    // `args=` suppresses the header; works on both macOS and Linux.
+    const out = execSync(`ps -p ${pid} -o args=`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    return out.trim()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Kill the daemon process and clean up its socket + pid file.
+ * Used when the running daemon is stale (wrong version).
+ */
+async function killStaleDaemon(pid: number): Promise<void> {
+  process.stderr.write(`telegram-topics shim: killing stale daemon pid=${pid}\n`)
+  try { process.kill(pid, 'SIGTERM') } catch {}
+  // Wait up to 3s for graceful shutdown.
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 100))
+    if (!isPidAlive(pid)) break
+  }
+  // Force kill if still alive.
+  if (isPidAlive(pid)) {
+    try { process.kill(pid, 'SIGKILL') } catch {}
+    await new Promise(r => setTimeout(r, 200))
+  }
+  // Clean up leftover socket and pid files so the new daemon starts clean.
+  try {
+    const { unlinkSync } = require('fs')
+    unlinkSync(SOCKET_PATH)
+  } catch {}
+  clearPid(STATE_DIR)
+}
+
+/**
+ * Check daemon health. Returns 'running' if alive and matches our plugin path,
+ * 'stale' if alive but from a different cache path (plugin was updated),
+ * 'dead' if not running.
+ */
+function checkDaemon(): 'running' | 'stale' | 'dead' {
+  const pid = readPid(STATE_DIR)
+  if (pid == null) return 'dead'
+  if (!isPidAlive(pid)) return 'dead'
+  // Daemon is alive — check if it's from the same plugin cache path as us.
+  const cmdline = getPidCmdline(pid)
+  if (cmdline == null) {
+    // Can't read cmdline — assume it's fine (benefit of the doubt).
+    return 'running'
+  }
+  // DAEMON_PATH is our plugin's daemon.ts path. If the running daemon's cmdline
+  // doesn't contain it, the daemon is from an older/different plugin cache.
+  if (!cmdline.includes(DAEMON_PATH)) {
+    process.stderr.write(
+      `telegram-topics shim: daemon cmdline "${cmdline}" does not match expected "${DAEMON_PATH}" — stale\n`,
+    )
+    return 'stale'
+  }
+  return 'running'
 }
 
 function spawnDaemon(): void {
@@ -322,7 +387,12 @@ async function waitForSocket(timeoutMs = 5000, intervalMs = 100): Promise<void> 
 }
 
 async function ensureDaemon(): Promise<void> {
-  if (isDaemonRunning() && existsSync(SOCKET_PATH)) return
+  const status = checkDaemon()
+  if (status === 'running' && existsSync(SOCKET_PATH)) return
+  if (status === 'stale') {
+    const pid = readPid(STATE_DIR)!
+    await killStaleDaemon(pid)
+  }
   spawnDaemon()
   await waitForSocket()
 }
