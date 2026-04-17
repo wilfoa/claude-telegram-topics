@@ -38,12 +38,20 @@ export type RemoveTopicMessage = {
   projectPath: string
 }
 
+export type RenameTopicMessage = {
+  type: 'rename_topic'
+  callId: string
+  projectPath: string
+  newName: string
+}
+
 export type ShimMessage =
   | RegisterMessage
   | ToolCallMessage
   | PermissionVerdictMessage
   | ForwardPermissionRequestMessage
   | RemoveTopicMessage
+  | RenameTopicMessage
 
 // --- Daemon → Shim ---
 
@@ -98,6 +106,13 @@ export type RemoveTopicResultMessage = {
   message: string
 }
 
+export type RenameTopicResultMessage = {
+  type: 'rename_topic_result'
+  callId: string
+  ok: boolean
+  message: string
+}
+
 export type DaemonMessage =
   | RegisteredMessage
   | InboundMessage
@@ -106,6 +121,7 @@ export type DaemonMessage =
   | PermissionVerdictForwardMessage
   | ErrorMessage
   | RemoveTopicResultMessage
+  | RenameTopicResultMessage
 
 /**
  * Parse newline-delimited JSON from a buffer.

@@ -19,6 +19,7 @@ The repo is small and flat — every source file lives at the root. There are no
 | `gate.ts` | Inbound-message gate: policy enforcement, pairing code generation, permission-reply regex. Pure. |
 | `instance.ts` | Auto-suffix helpers (`parseInstanceSuffix`, `pickAutoInstance`, `deriveAutoSuffixLabel`). Pure. |
 | `remove-topic.ts` | Standalone helper invoked by the `project remove-confirm` skill to issue a remove over the daemon socket. |
+| `rename-topic.ts` | Standalone helper invoked by the `configure topic` skill to issue a live rename over the daemon socket. |
 | `skills/<name>/SKILL.md` | User-invocable slash commands. Markdown with YAML frontmatter (`name`, `description`, `user-invocable`, `allowed-tools`). Claude interprets the body. |
 | `*.test.ts` | Tests — see [Testing](#testing). |
 | `.claude-plugin/plugin.json` | Plugin manifest. Bump `version` with every feat/fix commit. |
@@ -77,8 +78,8 @@ The daemon's `register` handler routes bare-cwd registrations through `pickAutoI
 
 Defined in `protocol.ts`. Newline-delimited JSON over a Unix socket. One message per line; embedded newlines in strings are JSON-escaped.
 
-Shim → Daemon: `register`, `tool_call`, `permission_verdict`, `forward_permission_request`, `remove_topic`.
-Daemon → Shim: `registered`, `inbound`, `tool_result`, `permission_request`, `permission_verdict_forward`, `error`, `remove_topic_result`.
+Shim → Daemon: `register`, `tool_call`, `permission_verdict`, `forward_permission_request`, `remove_topic`, `rename_topic`.
+Daemon → Shim: `registered`, `inbound`, `tool_result`, `permission_request`, `permission_verdict_forward`, `error`, `remove_topic_result`, `rename_topic_result`.
 
 To add a message type:
 1. Add the type literal + fields in `protocol.ts`, include it in the `ShimMessage` or `DaemonMessage` union.

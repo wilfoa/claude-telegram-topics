@@ -12,6 +12,7 @@ Unlike the official Telegram plugin — which funnels every Claude Code session 
 - **Concurrency-safe startup.** Simultaneous Claude Code sessions can't spawn duplicate daemons — an atomic lifetime lock on `daemon.lock` guarantees exactly one daemon per state dir, so you never hit the `409 Conflict` bot-token race. Shim-side `withSpawnLock` serializes spawn attempts on top of that.
 - **Parallel sessions in the same project.** Two Claude Code sessions in the same directory each get their own topic automatically: the first gets the primary, the second gets `${basename} (#2)`, the third gets `(#3)`, etc. Freed slots are reused. Set `TELEGRAM_TOPICS_INSTANCE=<name>` if you want a stable, human-chosen name instead of an integer.
 - **Remove topics safely.** `/telegram-topics:project remove <name>` deletes a topic from Telegram and clears local state — guarded by a two-step token confirmation.
+- **Rename topics live.** `/telegram-topics:configure topic "<name>"` renames the current project's topic immediately via `editForumTopic` — no session restart. Add `--instance <inst>` to target a named-instance topic.
 - **Self-healing across updates.** When you `/plugin update`, the shim detects a stale daemon from the old cache path and restarts it.
 
 ## How it works
@@ -136,13 +137,21 @@ That's it. Send a message in the new topic and Claude Code in that directory pic
 
 #### Custom topic name
 
-The default topic name is `basename(cwd)`. To override it, `cd` into the project **before** its first session and run:
+The default topic name is `basename(cwd)`. To override it:
 
 ```
 /telegram-topics:configure topic "General Dev"
 ```
 
-This writes to `~/.claude/channels/telegram-topics/labels.json`. On the next Claude Code session with `--channels`, the daemon creates the topic with that name (or renames an existing one via `editForumTopic`).
+This writes the label to `labels.json` *and* calls `editForumTopic` immediately, so the rename takes effect without a session restart. If the daemon isn't running at the time, the label is still saved and applies on the next Claude Code session.
+
+To rename a named-instance topic (e.g. one created via `TELEGRAM_TOPICS_INSTANCE=exp`), pass `--instance exp`:
+
+```
+/telegram-topics:configure topic "Exploratory" --instance exp
+```
+
+This targets `${cwd}#exp` specifically — it does not touch the primary topic or any auto-suffixed integer slots.
 
 #### Running multiple Claude Code sessions in the same project
 
@@ -186,7 +195,7 @@ The daemon calls `deleteForumTopic` and clears the entry from `topics.json`. Any
 | `/telegram-topics:configure <token>` | Save the bot token to `.env` |
 | `/telegram-topics:configure clear` | Remove the stored token |
 | `/telegram-topics:configure chat <id>` | Set the supergroup chat ID |
-| `/telegram-topics:configure topic <name>` | Set a custom topic name for the current project |
+| `/telegram-topics:configure topic "<name>" [--instance <inst>]` | Rename the topic live (no session restart needed). With `--instance`, targets `${cwd}#${inst}`. |
 | `/telegram-topics:configure instance [<name>]` | Print launch recipe for a secondary same-project session (uses `TELEGRAM_TOPICS_INSTANCE`); with no name, list instance topics for the cwd |
 | `/telegram-topics:help` | Show command list and the first-run checklist |
 | `/telegram-topics:pair <code>` | Approve a pairing code (shortcut) |

@@ -696,6 +696,89 @@ describe('remove_topic', () => {
     }
   }, LONG_TIMEOUT)
 
+  test('rename_topic updates topicName in topics.json even when Telegram API fails', async () => {
+    // Same pattern as remove_topic's fake-token tolerance: editForumTopic will
+    // 401 against our fake token, so we can't assert full success, but we CAN
+    // assert the failure path returns ok=false and topics.json stays unchanged.
+    const project = { path: '/tmp/proj-rename', topicId: 555, topicName: 'proj-rename' }
+    const dir = trackDir(seedStateDir({ projects: [project] }))
+    track(spawnDaemon(dir))
+    const sock = await waitForSocket(dir, 10_000)
+
+    const client = await Client.connect(sock)
+    try {
+      client.send({
+        type: 'rename_topic',
+        callId: 'rn-1',
+        projectPath: project.path,
+        newName: 'New Shiny Name',
+      })
+      const result = await client.await(
+        m => m.type === 'rename_topic_result' && m.callId === 'rn-1',
+        10_000,
+      ) as { type: 'rename_topic_result'; ok: boolean; message: string }
+
+      // Fake token → Telegram API fails → ok=false
+      expect(result.ok).toBe(false)
+      expect(result.message).toMatch(/Telegram API error/i)
+
+      // topics.json unchanged — we only commit the new name after the API call succeeds
+      const topicsNow = JSON.parse(readFileSync(join(dir, 'topics.json'), 'utf8'))
+      expect(topicsNow[project.path].topicName).toBe('proj-rename')
+    } finally {
+      client.close()
+    }
+  }, LONG_TIMEOUT)
+
+  test('rename_topic for an unknown project returns ok=false', async () => {
+    const dir = trackDir(seedStateDir())
+    track(spawnDaemon(dir))
+    const sock = await waitForSocket(dir, 10_000)
+
+    const client = await Client.connect(sock)
+    try {
+      client.send({
+        type: 'rename_topic',
+        callId: 'rn-404',
+        projectPath: '/tmp/nonexistent',
+        newName: 'whatever',
+      })
+      const result = await client.await(
+        m => m.type === 'rename_topic_result' && m.callId === 'rn-404',
+        8000,
+      ) as { type: 'rename_topic_result'; ok: boolean; message: string }
+      expect(result.ok).toBe(false)
+      expect(result.message).toMatch(/no topic registered/i)
+    } finally {
+      client.close()
+    }
+  }, LONG_TIMEOUT)
+
+  test('rename_topic with identical newName is a no-op (ok=true)', async () => {
+    const project = { path: '/tmp/proj-noop-rename', topicId: 666, topicName: 'already-this-name' }
+    const dir = trackDir(seedStateDir({ projects: [project] }))
+    track(spawnDaemon(dir))
+    const sock = await waitForSocket(dir, 10_000)
+
+    const client = await Client.connect(sock)
+    try {
+      client.send({
+        type: 'rename_topic',
+        callId: 'rn-noop',
+        projectPath: project.path,
+        newName: 'already-this-name',
+      })
+      const result = await client.await(
+        m => m.type === 'rename_topic_result' && m.callId === 'rn-noop',
+        5000,
+      ) as { type: 'rename_topic_result'; ok: boolean; message: string }
+      expect(result.ok).toBe(true)
+      expect(result.message).toMatch(/nothing to rename/i)
+    } finally {
+      client.close()
+    }
+  }, LONG_TIMEOUT)
+
   test('remove_topic for an unknown project returns ok=false', async () => {
     const dir = trackDir(seedStateDir())
     track(spawnDaemon(dir))

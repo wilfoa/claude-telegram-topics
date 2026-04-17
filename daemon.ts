@@ -322,6 +322,59 @@ function findShimByTopic(topicId: number): ShimSocket | undefined {
   return shimsByTopic.get(topicId)
 }
 
+async function handleRenameTopic(
+  shim: ShimSocket,
+  callId: string,
+  projectPath: string,
+  newName: string,
+): Promise<void> {
+  const topics = loadTopics(STATE_DIR)
+  const entry = topics[projectPath]
+  if (!entry) {
+    sendToShim(shim, {
+      type: 'rename_topic_result',
+      callId,
+      ok: false,
+      message: `no topic registered for projectPath "${projectPath}"`,
+    })
+    return
+  }
+  if (entry.topicName === newName) {
+    sendToShim(shim, {
+      type: 'rename_topic_result',
+      callId,
+      ok: true,
+      message: `topic "${newName}" already has that name; nothing to rename`,
+    })
+    return
+  }
+  try {
+    await bot.api.raw.editForumTopic({
+      chat_id: CHAT_ID,
+      message_thread_id: entry.topicId,
+      name: newName,
+    })
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err)
+    process.stderr.write(`telegram-topics daemon: editForumTopic failed: ${errMsg}\n`)
+    sendToShim(shim, {
+      type: 'rename_topic_result',
+      callId,
+      ok: false,
+      message: `Telegram API error: ${errMsg}`,
+    })
+    return
+  }
+  entry.topicName = newName
+  saveTopics(topics, STATE_DIR)
+  sendToShim(shim, {
+    type: 'rename_topic_result',
+    callId,
+    ok: true,
+    message: `renamed topic (id ${entry.topicId}) to "${newName}"`,
+  })
+}
+
 async function handleRemoveTopic(shim: ShimSocket, callId: string, projectPath: string): Promise<void> {
   const topics = loadTopics(STATE_DIR)
   const entry = topics[projectPath]
@@ -455,6 +508,11 @@ async function handleShimMessage(shim: ShimSocket, msg: ShimMessage): Promise<vo
 
     case 'remove_topic': {
       await handleRemoveTopic(shim, msg.callId, msg.projectPath)
+      break
+    }
+
+    case 'rename_topic': {
+      await handleRenameTopic(shim, msg.callId, msg.projectPath, msg.newName)
       break
     }
 
@@ -1064,16 +1122,13 @@ process.on('SIGTERM', shutdown)
 process.on('SIGINT', shutdown)
 process.on('SIGHUP', shutdown)
 
-// Orphan watchdog: detect parent chain breakage
-const bootPpid = process.ppid
-const orphanWatchdog = setInterval(() => {
-  const orphaned =
-    (process.platform !== 'win32' && process.ppid !== bootPpid) ||
-    process.stdin.destroyed ||
-    process.stdin.readableEnded
-  if (orphaned) shutdown()
-}, 5000)
-orphanWatchdog.unref()
+// No orphan watchdog here. The daemon is shared across shims: every shim
+// that spawns it (with detached:true, child.unref()) eventually exits before
+// the daemon, so a ppid-change guard would always fire and kill the daemon
+// as soon as the spawning shim dies. Cleanup is driven by explicit signals,
+// the idle timer (60s after the last shim disconnects), and the 409-persist
+// exit in the bot-polling loop — those are the right mechanisms for this
+// architecture. See AGENTS.md "Concurrency invariants" for the rationale.
 
 // ---------------------------------------------------------------------------
 // Bot polling with retry/backoff

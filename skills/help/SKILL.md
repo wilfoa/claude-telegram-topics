@@ -122,7 +122,11 @@ COMMANDS
 Setup:
   /telegram-topics:configure <token>          Save the bot token
   /telegram-topics:configure chat <chat_id>   Set the supergroup chat ID
-  /telegram-topics:configure topic <name>     Custom topic name for cwd
+  /telegram-topics:configure topic "<name>" [--instance <inst>]
+                                              Rename the topic live (no
+                                              session restart needed).
+                                              --instance targets a named
+                                              instance topic.
   /telegram-topics:configure instance [name]  Launch recipe for a second
                                               Claude Code session in the same
                                               project with its own topic.

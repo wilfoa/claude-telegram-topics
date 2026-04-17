@@ -9,6 +9,7 @@ allowed-tools:
   - Bash(mkdir *)
   - Bash(chmod *)
   - Bash(kill *)
+  - Bash(bun *)
 ---
 
 # /telegram-topics:configure — Channel Setup
@@ -107,22 +108,36 @@ Auto-suffix is the default behavior: the first bare-cwd session gets the primary
    >
    > To remove the named topic later: `/telegram-topics:project remove <cwd>#<name>`.
 
-### `topic <name>` — set topic name for current project
+### `topic "<name>" [--instance <inst>]` — rename the topic (live, no restart needed)
 
-The user's preferred label lives in a **separate `labels.json` file** (not `topics.json`).
-This keeps it independent of the daemon's tracked state. If the skill wrote to `topics.json`
-directly, the daemon would see the name already matches and skip the `editForumTopic` call,
-so the actual Telegram topic would never rename.
+The user's preferred label lives in `labels.json` (never in `topics.json`, which is
+daemon-owned state). The skill updates `labels.json` for persistence **and** invokes the
+`rename-topic.ts` helper so the Telegram topic is renamed live — no session restart.
 
-1. Read `~/.claude/channels/telegram-topics/labels.json` (create `{}` if missing).
-2. Get the current working directory path (this is the key).
-3. Set `labels[cwd] = "<name>"`.
-4. Write back with `chmod 600`.
-5. Confirm: "Topic label for this project set to '<name>'. It will be created or renamed on next session restart."
+Parse `$ARGUMENTS`:
+- The new name is a quoted or bare string (e.g. `topic "My Project"` or `topic proj`).
+- Optional flag `--instance <inst>` targets the named instance at `${cwd}#${inst}` instead of the bare cwd. `<inst>` is the same alphanumeric-dashes-underscores, 1–20 chars, NOT a pure integer.
+- No `--instance` flag → targets the bare cwd (the primary slot).
 
-Note: the rename happens when the shim next connects to the daemon (i.e. next Claude Code
-session with `--channels`). If Claude Code is currently running, exit and restart for the
-change to take effect.
+Steps:
+
+1. Validate the name: non-empty, ≤ 128 chars (Telegram's topic name cap). Reject if it contains control characters.
+2. Determine the target `projectPath`:
+   - If `--instance <inst>` was passed: `${cwd}#${inst}`.
+   - Else: `${cwd}`.
+3. Read `~/.claude/channels/telegram-topics/labels.json` (create `{}` if missing).
+4. Set `labels[projectPath] = "<name>"`. Write back with `chmod 600`.
+5. Invoke the rename helper:
+   ```bash
+   bun "${CLAUDE_PLUGIN_ROOT}/rename-topic.ts" "<projectPath>" "<name>"
+   ```
+   - Exit 0 → live rename succeeded (topic renamed in Telegram + `topics.json` updated). Confirm: "Topic renamed to '<name>'."
+   - Exit 0 with "daemon socket not found" on stderr → label saved to `labels.json`; it will apply on the next Claude Code session. Confirm: "Label saved; rename will apply on next session restart (daemon not currently running)."
+   - Exit non-zero → surface the helper's output/error; DO NOT revert `labels.json` since the user's preference is still valid for future sessions.
+
+Notes:
+- The helper is safe to call even when the topic doesn't exist yet (unknown `projectPath` → exit 1 with "no topic registered"). In that case the label is still saved and will apply when the topic is first created on a future session.
+- `--instance <inst>` does **not** read the `TELEGRAM_TOPICS_INSTANCE` env var — if the user wants to rename the *current* named instance's topic, they pass `--instance <inst>` explicitly.
 
 ---
 
