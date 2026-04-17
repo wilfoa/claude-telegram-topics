@@ -1,6 +1,6 @@
 ---
 name: configure
-description: Set up the Telegram Topics channel — save the bot token, configure the supergroup chat ID, and set topic names. Use when the user pastes a bot token, asks to configure Telegram Topics, or wants to check channel status.
+description: Set up the Telegram Topics channel — save the bot token, configure the supergroup chat ID, set topic names, or get the launch recipe for a secondary same-project instance. Use when the user pastes a bot token, asks to configure Telegram Topics, wants to check channel status, or needs to run a second Claude session in the same directory with its own topic.
 user-invocable: true
 allowed-tools:
   - Read
@@ -83,6 +83,25 @@ Delete the `CLAUDE_TELEGRAM_TOPICS_BOT_TOKEN=` line from `.env`.
 3. If `<chat_id>` is a number (possibly negative), set `chatId` to that string in access.json.
 4. Write back.
 5. Note: "Chat ID changes need a daemon restart."
+
+### `instance <name>` — run a second Claude Code session in the same project, with its own topic
+
+The plugin keys topics by `projectPath`. Two Claude Code sessions in the same directory therefore compete for the same topic, and the newer one evicts the older (see README "Two-session same-project"). To run a genuine second instance with its own independent topic, launch Claude Code with `TELEGRAM_TOPICS_INSTANCE` set.
+
+This dispatch does **not** persist anything — it only prints the launch recipe, since the env var is a per-shell concept. If `$ARGUMENTS` is `instance` (no name), list currently-registered instance topics for the cwd and reprint the recipe.
+
+1. Read `$ARGUMENTS`. Parse off the leading `instance ` prefix; treat the remainder as `<name>`. If the remainder is empty:
+   - Read `topics.json` and list entries whose key starts with `${cwd}#`. Show the instance names and topic IDs.
+   - Print the launch recipe (step 3 below) with `<name>` as a placeholder.
+2. If `<name>` is given, validate: lowercase alphanumerics + dashes/underscores, 1–20 chars. Reject anything else — it becomes part of the topic name that Telegram has to accept.
+3. Print, verbatim:
+   > Start the secondary session from a fresh terminal in this directory:
+   > ```
+   > TELEGRAM_TOPICS_INSTANCE=<name> claude --dangerously-load-development-channels plugin:telegram-topics@wilfoa-plugins
+   > ```
+   > On first connect it will create a new topic named `<basename-of-cwd> (<name>)` (or `<label-from-configure-topic> (<name>)` if you've set a custom label for this project). Your other session's topic is untouched.
+   >
+   > To remove the instance topic later, run `/telegram-topics:project remove <basename-of-cwd> (<name>)` (or use the full `<cwd>#<name>` path).
 
 ### `topic <name>` — set topic name for current project
 

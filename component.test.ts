@@ -14,6 +14,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from 'fs'
@@ -138,10 +139,18 @@ class Client {
     this.socket.write(serialize(msg))
   }
 
-  /** Wait for the first message matching predicate, with timeout. */
+  /**
+   * Wait for the first matching message. Consumes messages from `inbox` so
+   * repeated `await` calls advance through the stream rather than re-matching
+   * the same message. Checks already-received messages first so a late waiter
+   * doesn't miss a message that arrived while the caller was doing other work.
+   */
   await(predicate: (m: DaemonMessage) => boolean, timeoutMs = 3000): Promise<DaemonMessage> {
-    // Check already-received messages first (shouldn't re-deliver — use indexed
-    // wait instead if needed), then register a waiter.
+    for (let i = 0; i < this.inbox.length; i++) {
+      if (predicate(this.inbox[i]!)) {
+        return Promise.resolve(this.inbox.splice(i, 1)[0]!)
+      }
+    }
     return new Promise<DaemonMessage>((resolve, reject) => {
       const timer = setTimeout(() => {
         const idx = this.waiters.findIndex(w => w.predicate === predicate)
@@ -467,5 +476,107 @@ describe('daemon restart', () => {
     const b = track(spawnDaemon(dir))
     await waitForSocket(dir, 10_000)
     expect(b.exitCode).toBeNull()
+  }, LONG_TIMEOUT)
+})
+
+// ---------------------------------------------------------------------------
+// Instance labeling — two sessions in the "same" project keyed by
+// ${cwd}#${instance} get independent topics and do NOT evict each other.
+// This mirrors the real flow when a user sets TELEGRAM_TOPICS_INSTANCE.
+// ---------------------------------------------------------------------------
+
+describe('instance coexistence', () => {
+  test('primary (cwd) and instance-suffixed (cwd#exp) registrations coexist', async () => {
+    const primary = { path: '/tmp/proj-x', topicId: 501, topicName: 'proj-x' }
+    const secondary = { path: '/tmp/proj-x#exp', topicId: 502, topicName: 'proj-x (exp)' }
+    const dir = trackDir(seedStateDir({ projects: [primary, secondary] }))
+    track(spawnDaemon(dir))
+    const sock = await waitForSocket(dir, 10_000)
+
+    const a = await Client.connect(sock)
+    const b = await Client.connect(sock)
+    try {
+      a.send({ type: 'register', projectPath: primary.path, topicLabel: primary.topicName })
+      b.send({ type: 'register', projectPath: secondary.path, topicLabel: secondary.topicName })
+      const [ra, rb] = await Promise.all([
+        a.await(m => m.type === 'registered', 8000),
+        b.await(m => m.type === 'registered', 8000),
+      ])
+      expect((ra as { topicId: number }).topicId).toBe(501)
+      expect((rb as { topicId: number }).topicId).toBe(502)
+      // No eviction on either side.
+      await new Promise(r => setTimeout(r, 200))
+      expect(a.inbox.filter(m => m.type === 'error')).toEqual([])
+      expect(b.inbox.filter(m => m.type === 'error')).toEqual([])
+    } finally {
+      a.close()
+      b.close()
+    }
+  }, LONG_TIMEOUT)
+})
+
+// ---------------------------------------------------------------------------
+// remove_topic — clears local state even when Telegram API fails (401 with
+// our fake token), evicts any attached shim, and returns a success result.
+// ---------------------------------------------------------------------------
+
+describe('remove_topic', () => {
+  test('removes a registered project and evicts its attached shim', async () => {
+    const project = { path: '/tmp/proj-remove', topicId: 606, topicName: 'proj-remove' }
+    const dir = trackDir(seedStateDir({ projects: [project] }))
+    track(spawnDaemon(dir))
+    const sock = await waitForSocket(dir, 10_000)
+
+    // Connect two clients: one registers for the project (the "victim"), the
+    // other issues the remove_topic request.
+    const victim = await Client.connect(sock)
+    const requester = await Client.connect(sock)
+    try {
+      victim.send({ type: 'register', projectPath: project.path, topicLabel: project.topicName })
+      await victim.await(m => m.type === 'registered', 8000)
+
+      requester.send({ type: 'remove_topic', callId: 'rm-1', projectPath: project.path })
+      const result = await requester.await(
+        m => m.type === 'remove_topic_result' && m.callId === 'rm-1',
+        10_000,
+      ) as { type: 'remove_topic_result'; ok: boolean; message: string }
+
+      // ok === true even though deleteForumTopic fails (fake token) — daemon
+      // clears local state regardless so the user isn't stuck.
+      expect(result.ok).toBe(true)
+      expect(result.message).toMatch(/(deleted|cleared local state)/i)
+
+      // topics.json no longer contains the entry.
+      const topicsNow = JSON.parse(readFileSync(join(dir, 'topics.json'), 'utf8'))
+      expect(topicsNow[project.path]).toBeUndefined()
+
+      // Victim was evicted: received "topic removed" and its socket was ended.
+      const [evictErr] = await Promise.all([
+        victim.await(m => m.type === 'error' && /topic removed/i.test(m.message), 5000),
+      ])
+      expect(evictErr).toBeTruthy()
+    } finally {
+      victim.close()
+      requester.close()
+    }
+  }, LONG_TIMEOUT)
+
+  test('remove_topic for an unknown project returns ok=false', async () => {
+    const dir = trackDir(seedStateDir())
+    track(spawnDaemon(dir))
+    const sock = await waitForSocket(dir, 10_000)
+
+    const client = await Client.connect(sock)
+    try {
+      client.send({ type: 'remove_topic', callId: 'rm-404', projectPath: '/tmp/does-not-exist' })
+      const result = await client.await(
+        m => m.type === 'remove_topic_result' && m.callId === 'rm-404',
+        5000,
+      ) as { type: 'remove_topic_result'; ok: boolean; message: string }
+      expect(result.ok).toBe(false)
+      expect(result.message).toMatch(/no topic registered/i)
+    } finally {
+      client.close()
+    }
   }, LONG_TIMEOUT)
 })

@@ -32,7 +32,18 @@ export type ForwardPermissionRequestMessage = {
   inputPreview: string
 }
 
-export type ShimMessage = RegisterMessage | ToolCallMessage | PermissionVerdictMessage | ForwardPermissionRequestMessage
+export type RemoveTopicMessage = {
+  type: 'remove_topic'
+  callId: string
+  projectPath: string
+}
+
+export type ShimMessage =
+  | RegisterMessage
+  | ToolCallMessage
+  | PermissionVerdictMessage
+  | ForwardPermissionRequestMessage
+  | RemoveTopicMessage
 
 // --- Daemon → Shim ---
 
@@ -73,6 +84,13 @@ export type ErrorMessage = {
   message: string
 }
 
+export type RemoveTopicResultMessage = {
+  type: 'remove_topic_result'
+  callId: string
+  ok: boolean
+  message: string
+}
+
 export type DaemonMessage =
   | RegisteredMessage
   | InboundMessage
@@ -80,6 +98,7 @@ export type DaemonMessage =
   | PermissionRequestMessage
   | PermissionVerdictForwardMessage
   | ErrorMessage
+  | RemoveTopicResultMessage
 
 /**
  * Parse newline-delimited JSON from a buffer.

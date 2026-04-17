@@ -70,22 +70,47 @@ function loadEnv(): void {
 loadEnv()
 
 // ---------------------------------------------------------------------------
-// Topic label resolution
+// Project identity + topic label resolution
 // ---------------------------------------------------------------------------
+
+/**
+ * Resolve the effective projectPath used for daemon registration.
+ *
+ * If TELEGRAM_TOPICS_INSTANCE is set, the shim runs under a named instance
+ * and registers a distinct topic keyed by `${cwd}#${instance}`. This is how
+ * users intentionally run two Claude Code sessions in the same directory
+ * without triggering the last-writer-wins eviction.
+ */
+export function resolveProjectPath(cwd: string, instance: string | undefined): string {
+  if (instance && instance.trim()) return `${cwd}#${instance.trim()}`
+  return cwd
+}
+
+/**
+ * Resolve the desired topic label, honoring (in priority order):
+ *   1. explicit label in labels.json for the effective projectPath
+ *   2. explicit label in labels.json for the bare cwd, suffixed with instance
+ *   3. existing topic name in topics.json for the effective projectPath
+ *   4. default — basename(cwd), suffixed with instance when present
+ */
+export function resolveTopicLabelFor(
+  cwd: string,
+  instance: string | undefined,
+  labels: Record<string, string>,
+  topics: Record<string, { topicId: number; topicName: string }>,
+): string {
+  const effective = resolveProjectPath(cwd, instance)
+  if (labels[effective]) return labels[effective]
+  if (instance && labels[cwd]) return `${labels[cwd]} (${instance})`
+  if (topics[effective]?.topicName) return topics[effective]!.topicName
+  const base = basename(cwd)
+  return instance && instance.trim() ? `${base} (${instance.trim()})` : base
+}
 
 function resolveTopicLabel(): string {
   const cwd = process.cwd()
-  // User-configured label takes priority — set via /telegram-topics:configure topic
-  const labels = loadLabels(STATE_DIR)
-  if (labels[cwd]) {
-    return labels[cwd]
-  }
-  // Fall back to previously-created topic name, then directory basename
-  const topics = loadTopics(STATE_DIR)
-  if (topics[cwd]?.topicName) {
-    return topics[cwd].topicName
-  }
-  return basename(cwd)
+  const instance = process.env.TELEGRAM_TOPICS_INSTANCE
+  return resolveTopicLabelFor(cwd, instance, loadLabels(STATE_DIR), loadTopics(STATE_DIR))
 }
 
 // ---------------------------------------------------------------------------
@@ -537,7 +562,7 @@ async function connectToDaemon(): Promise<void> {
           const topicLabel = resolveTopicLabel()
           const registerMsg: ShimMessage = {
             type: 'register',
-            projectPath: process.cwd(),
+            projectPath: resolveProjectPath(process.cwd(), process.env.TELEGRAM_TOPICS_INSTANCE),
             topicLabel,
           }
           socket.write(serialize(registerMsg))

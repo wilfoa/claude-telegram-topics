@@ -9,6 +9,9 @@ Unlike the official Telegram plugin — which funnels every Claude Code session 
 - **One topic per project.** `/Users/amir/Development/my-api` gets its own Forum Topic, separate from `/Users/amir/Development/web-app`.
 - **Same capabilities as the official Telegram plugin.** Reply, react, download attachments, edit messages, permission relay, sender allowlists, pairing flow.
 - **Auto-managed daemon.** A single long-lived process owns the bot and serves all local Claude Code sessions over a Unix socket. Auto-starts on first session, idles out after the last one disconnects.
+- **Concurrency-safe startup.** Simultaneous Claude Code sessions can't spawn duplicate daemons — an atomic lifetime lock on `daemon.lock` guarantees exactly one daemon per state dir, so you never hit the `409 Conflict` bot-token race. Shim-side `withSpawnLock` serializes spawn attempts on top of that.
+- **Named instances.** Set `TELEGRAM_TOPICS_INSTANCE=<name>` to run a second Claude Code session in the same directory with its own independent topic (no eviction).
+- **Remove topics safely.** `/telegram-topics:project remove <name>` deletes a topic from Telegram and clears local state — guarded by a two-step token confirmation.
 - **Self-healing across updates.** When you `/plugin update`, the shim detects a stale daemon from the old cache path and restarts it.
 
 ## How it works
@@ -141,6 +144,34 @@ The default topic name is `basename(cwd)`. To override it, `cd` into the project
 
 This writes to `~/.claude/channels/telegram-topics/labels.json`. On the next Claude Code session with `--channels`, the daemon creates the topic with that name (or renames an existing one via `editForumTopic`).
 
+#### Running multiple Claude Code sessions in the same project
+
+Two sessions in the same directory normally compete for one topic — the newer one evicts the older (last-writer-wins). To run a genuinely parallel second session with its own topic, set `TELEGRAM_TOPICS_INSTANCE`:
+
+```bash
+TELEGRAM_TOPICS_INSTANCE=exp claude --dangerously-load-development-channels plugin:telegram-topics@wilfoa-plugins
+```
+
+The shim registers under `${cwd}#exp` and creates a topic named `${basename} (exp)` (or `${your-label} (exp)` if you've set a custom label). The original session's topic is untouched. Names must match `[a-z0-9-_]{1,20}`.
+
+Run `/telegram-topics:configure instance` (no name) inside a session to list any instance topics already registered for the current project, or `/telegram-topics:configure instance <name>` to get the copy-pasteable launch recipe.
+
+#### Removing a topic
+
+Topics accumulate as projects come and go. To delete one:
+
+```
+/telegram-topics:project remove <name-or-path>
+```
+
+The skill prints a 6-character token and waits. You then run:
+
+```
+/telegram-topics:project remove-confirm <token>
+```
+
+The daemon calls `deleteForumTopic` and clears the entry from `topics.json`. Any Claude Code session still attached to that topic is evicted with a `"topic removed"` error. Tokens expire after 5 minutes.
+
 ## Plugin commands
 
 | Command | Purpose |
@@ -150,6 +181,7 @@ This writes to `~/.claude/channels/telegram-topics/labels.json`. On the next Cla
 | `/telegram-topics:configure clear` | Remove the stored token |
 | `/telegram-topics:configure chat <id>` | Set the supergroup chat ID |
 | `/telegram-topics:configure topic <name>` | Set a custom topic name for the current project |
+| `/telegram-topics:configure instance [<name>]` | Print launch recipe for a secondary same-project session (uses `TELEGRAM_TOPICS_INSTANCE`); with no name, list instance topics for the cwd |
 | `/telegram-topics:help` | Show command list and the first-run checklist |
 | `/telegram-topics:pair <code>` | Approve a pairing code (shortcut) |
 | `/telegram-topics:access pair <code>` | Same, via the access skill |
@@ -158,6 +190,8 @@ This writes to `~/.claude/channels/telegram-topics/labels.json`. On the next Cla
 | `/telegram-topics:access remove <senderId>` | Remove a user from the allowlist |
 | `/telegram-topics:access policy <mode>` | `pairing`, `allowlist`, or `disabled` |
 | `/telegram-topics:project list` | List all registered projects and their topics |
+| `/telegram-topics:project remove <name-or-path>` | Request deletion of a topic. Prints a confirmation token. |
+| `/telegram-topics:project remove-confirm <token>` | Complete the deletion using the token from the previous step (5 min TTL) |
 | `/telegram-topics:daemon status` | Show daemon PID, uptime, and plugin version |
 | `/telegram-topics:daemon stop` | Kill the daemon |
 | `/telegram-topics:daemon restart` | Kill the daemon; next session auto-spawns a fresh one |
@@ -175,8 +209,11 @@ All under `~/.claude/channels/telegram-topics/`:
 | `labels.json` | configure skill only | `{ [projectPath]: label }` — user's preferred topic names |
 | `daemon.pid` | daemon | PID of the running daemon |
 | `daemon.sock` | daemon | Unix socket |
+| `daemon.lock` | daemon | Lifetime lock held exclusively by the running daemon; auto-removed on exit |
+| `daemon.spawn.lock` | shim | Short-lived advisory lock held during spawn critical section |
 | `daemon.log` | daemon | stdout + stderr |
 | `approved/` | access skill | Temporary pairing confirmation files |
+| `pending-removes/` | project skill | `<token>.json` files for in-flight topic removal confirmations |
 | `inbox/` | daemon | Downloaded attachments |
 
 **Why two files for topics?** `topics.json` tracks what Telegram has (daemon-owned). `labels.json` tracks what the user wants (skill-owned). Keeping them separate means the skill can request a rename without making the daemon think the rename already happened.

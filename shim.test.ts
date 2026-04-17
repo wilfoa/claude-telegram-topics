@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { parseDaemonsFromPs, selectDaemonToKeep, withSpawnLock } from './shim'
+import {
+  parseDaemonsFromPs,
+  resolveProjectPath,
+  resolveTopicLabelFor,
+  selectDaemonToKeep,
+  withSpawnLock,
+} from './shim'
 
 describe('parseDaemonsFromPs', () => {
   test('picks out telegram-topics daemon processes', () => {
@@ -199,5 +205,72 @@ describe('withSpawnLock', () => {
     const results = await Promise.all(tasks)
     expect(maxActive).toBe(1)
     expect(results.sort((a, b) => a - b)).toEqual([0,1,2,3,4,5,6,7,8,9])
+  })
+})
+
+describe('resolveProjectPath', () => {
+  test('returns cwd unchanged when no instance env', () => {
+    expect(resolveProjectPath('/a/b', undefined)).toBe('/a/b')
+    expect(resolveProjectPath('/a/b', '')).toBe('/a/b')
+  })
+
+  test('appends #instance when instance is set', () => {
+    expect(resolveProjectPath('/a/b', 'exp')).toBe('/a/b#exp')
+  })
+
+  test('trims whitespace from instance and treats whitespace-only as unset', () => {
+    expect(resolveProjectPath('/a/b', '  exp  ')).toBe('/a/b#exp')
+    expect(resolveProjectPath('/a/b', '   ')).toBe('/a/b')
+  })
+})
+
+describe('resolveTopicLabelFor', () => {
+  test('falls back to basename(cwd) with no labels or topics', () => {
+    expect(resolveTopicLabelFor('/a/foo', undefined, {}, {})).toBe('foo')
+  })
+
+  test('honors explicit label for bare cwd', () => {
+    expect(resolveTopicLabelFor('/a/foo', undefined, { '/a/foo': 'Friendly' }, {})).toBe('Friendly')
+  })
+
+  test('falls back to existing topic name when no label is set', () => {
+    expect(
+      resolveTopicLabelFor('/a/foo', undefined, {}, { '/a/foo': { topicId: 1, topicName: 'Stored Name' } }),
+    ).toBe('Stored Name')
+  })
+
+  test('instance without labels → basename suffixed', () => {
+    expect(resolveTopicLabelFor('/a/foo', 'exp', {}, {})).toBe('foo (exp)')
+  })
+
+  test('instance with bare-cwd label → label suffixed', () => {
+    expect(
+      resolveTopicLabelFor('/a/foo', 'exp', { '/a/foo': 'Friendly' }, {}),
+    ).toBe('Friendly (exp)')
+  })
+
+  test('explicit label for instance key wins over everything', () => {
+    expect(
+      resolveTopicLabelFor(
+        '/a/foo',
+        'exp',
+        { '/a/foo': 'Friendly', '/a/foo#exp': 'Experimental Friendly' },
+        { '/a/foo#exp': { topicId: 2, topicName: 'Other' } },
+      ),
+    ).toBe('Experimental Friendly')
+  })
+
+  test('instance with existing topic name but no label → reuses topic name (not re-suffixed)', () => {
+    // If a topic has previously been created for the instance, honor its
+    // actual name rather than re-suffixing a default — the user may have
+    // renamed it server-side.
+    expect(
+      resolveTopicLabelFor(
+        '/a/foo',
+        'exp',
+        {},
+        { '/a/foo#exp': { topicId: 2, topicName: 'Renamed Experimental' } },
+      ),
+    ).toBe('Renamed Experimental')
   })
 })

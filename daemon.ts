@@ -321,6 +321,55 @@ function findShimByTopic(topicId: number): ShimSocket | undefined {
   return shimsByTopic.get(topicId)
 }
 
+async function handleRemoveTopic(shim: ShimSocket, callId: string, projectPath: string): Promise<void> {
+  const topics = loadTopics(STATE_DIR)
+  const entry = topics[projectPath]
+  if (!entry) {
+    sendToShim(shim, {
+      type: 'remove_topic_result',
+      callId,
+      ok: false,
+      message: `no topic registered for projectPath "${projectPath}"`,
+    })
+    return
+  }
+
+  // Delete the Telegram topic first. If this fails (e.g. already deleted
+  // server-side), we still clear local state so the user isn't stuck with a
+  // stale entry they can't remove.
+  let apiMessage = `deleted topic "${entry.topicName}" (id ${entry.topicId})`
+  try {
+    await bot.api.raw.deleteForumTopic({
+      chat_id: CHAT_ID,
+      message_thread_id: entry.topicId,
+    })
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err)
+    process.stderr.write(`telegram-topics daemon: deleteForumTopic failed: ${errMsg}\n`)
+    apiMessage = `cleared local state for "${entry.topicName}" (id ${entry.topicId}); Telegram API error: ${errMsg}`
+  }
+
+  // Clear local state.
+  delete topics[projectPath]
+  saveTopics(topics, STATE_DIR)
+
+  // Evict any shim still attached to this topic.
+  const stranded = shimsByTopic.get(entry.topicId)
+  if (stranded) {
+    sendToShim(stranded, { type: 'error', message: 'topic removed' })
+    try { stranded.socket.end() } catch {}
+    shimsByTopic.delete(entry.topicId)
+    topicToProject.delete(entry.topicId)
+  }
+
+  sendToShim(shim, {
+    type: 'remove_topic_result',
+    callId,
+    ok: true,
+    message: apiMessage,
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Shim message handler
 // ---------------------------------------------------------------------------
@@ -374,6 +423,11 @@ async function handleShimMessage(shim: ShimSocket, msg: ShimMessage): Promise<vo
         }
         sendToShim(shim, toolResult)
       }
+      break
+    }
+
+    case 'remove_topic': {
+      await handleRemoveTopic(shim, msg.callId, msg.projectPath)
       break
     }
 

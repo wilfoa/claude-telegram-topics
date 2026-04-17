@@ -74,6 +74,35 @@ PER-PROJECT SETUP  (each new project directory)
         prompts all thread back to the same topic.
 
 ====================================================================
+RUNNING TWO CLAUDE CODE SESSIONS IN THE SAME PROJECT
+====================================================================
+
+Two sessions in the same directory compete for one topic — the newer
+one wins and the older one stays connected but stops receiving
+inbound Telegram messages. To run a parallel second session with its
+own independent topic, set TELEGRAM_TOPICS_INSTANCE on launch:
+
+    TELEGRAM_TOPICS_INSTANCE=exp claude \
+      --dangerously-load-development-channels \
+      plugin:telegram-topics@wilfoa-plugins
+
+It registers as "<basename> (exp)" under key "<cwd>#exp". No eviction.
+Run /telegram-topics:configure instance <name> to get this recipe.
+
+====================================================================
+REMOVING A TOPIC
+====================================================================
+
+Two-step, token-confirmed:
+
+    /telegram-topics:project remove <name-or-path>
+    # → prints a 6-char token (5 min TTL)
+    /telegram-topics:project remove-confirm <token>
+
+Deletes the topic from Telegram and clears its entry from
+topics.json. Any Claude Code session still attached is evicted.
+
+====================================================================
 COMMANDS
 ====================================================================
 
@@ -81,6 +110,10 @@ Setup:
   /telegram-topics:configure <token>          Save the bot token
   /telegram-topics:configure chat <chat_id>   Set the supergroup chat ID
   /telegram-topics:configure topic <name>     Custom topic name for cwd
+  /telegram-topics:configure instance [name]  Launch recipe for a second
+                                              Claude Code session in the same
+                                              project with its own topic.
+                                              No name → list instance topics.
   /telegram-topics:configure clear            Remove the stored token
   /telegram-topics:configure                  Show full status
 
@@ -94,6 +127,10 @@ Pairing / access:
 
 Projects:
   /telegram-topics:project list               Show all registered topics
+  /telegram-topics:project remove <name|path> Request deletion. Prints a
+                                              confirmation token (5 min TTL).
+  /telegram-topics:project remove-confirm <token>
+                                              Complete the deletion.
 
 Daemon:
   /telegram-topics:daemon status              PID, uptime, version
