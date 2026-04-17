@@ -219,6 +219,30 @@ let registered = false
 // make every reconnect look like a fresh assignment.
 const notifiedAutoSuffixes = new Set<number>()
 
+// The daemon may respond with `registered` before the MCP stdio transport
+// finishes its initialize handshake with Claude Code. Notifications sent
+// before that are silently lost. Queue them here at module scope and flush
+// once main() has called `server.connect(transport)`.
+let mcpReady = false
+const pendingNotifications: Array<() => Promise<unknown>> = []
+
+function emitChannelNotification(
+  params: { content: string; meta: Record<string, string> },
+): void {
+  const fire = (): Promise<unknown> =>
+    server.notification({
+      method: 'notifications/claude/channel',
+      params,
+    }).catch(err => {
+      process.stderr.write(`telegram-topics shim: notification failed: ${err}\n`)
+    })
+  if (mcpReady) {
+    void fire()
+  } else {
+    pendingNotifications.push(fire)
+  }
+}
+
 function sendToDaemon(msg: ShimMessage): void {
   if (!daemonConnected || !daemonSocket) {
     throw new Error('not connected to daemon')
@@ -243,24 +267,19 @@ function handleDaemonMessage(msg: DaemonMessage): void {
       // keying on it would re-fire every reconnect.
       if (msg.autoSuffix !== undefined && !notifiedAutoSuffixes.has(msg.autoSuffix)) {
         notifiedAutoSuffixes.add(msg.autoSuffix)
-        server.notification({
-          method: 'notifications/claude/channel',
-          params: {
-            content:
-              `This Claude Code session was auto-assigned to instance #${msg.autoSuffix} ` +
-              `for this project directory (topic: "${msg.topicName}", id ${msg.topicId}) ` +
-              `because another session already holds the primary slot. ` +
-              `To pin a stable human-chosen name instead of an integer, relaunch this session with ` +
-              `TELEGRAM_TOPICS_INSTANCE=<name>.`,
-            meta: {
-              kind: 'auto_suffix',
-              instance: String(msg.autoSuffix),
-              topic_name: msg.topicName,
-              topic_id: String(msg.topicId),
-            },
+        emitChannelNotification({
+          content:
+            `This Claude Code session was auto-assigned to instance #${msg.autoSuffix} ` +
+            `for this project directory (topic: "${msg.topicName}", id ${msg.topicId}) ` +
+            `because another session already holds the primary slot. ` +
+            `To pin a stable human-chosen name instead of an integer, relaunch this session with ` +
+            `TELEGRAM_TOPICS_INSTANCE=<name>.`,
+          meta: {
+            kind: 'auto_suffix',
+            instance: String(msg.autoSuffix),
+            topic_name: msg.topicName,
+            topic_id: String(msg.topicId),
           },
-        }).catch(err => {
-          process.stderr.write(`telegram-topics shim: failed to send auto_suffix notification: ${err}\n`)
         })
       }
       break
@@ -837,6 +856,12 @@ async function main(): Promise<void> {
   // Start MCP server on stdio
   const transport = new StdioServerTransport()
   await server.connect(transport)
+  mcpReady = true
+  // Drain any notifications the daemon fired at us before stdio was ready —
+  // typically the `auto_suffix` notice that lands together with the initial
+  // `registered` response.
+  const drain = pendingNotifications.splice(0)
+  for (const fn of drain) void fn()
 
   process.stderr.write('telegram-topics shim: MCP server running on stdio\n')
 }
