@@ -35,6 +35,7 @@ import {
   DEFAULT_STATE_DIR,
   loadAccess,
   saveAccess,
+  loadLabels,
   loadTopics,
   saveTopics,
   loadToken,
@@ -450,7 +451,14 @@ async function handleShimMessage(shim: ShimSocket, msg: ShimMessage): Promise<vo
           const picked = pickAutoInstance(msg.projectPath, live)
           effectivePath = picked.effectivePath
           if (picked.instance !== 1) {
-            effectiveLabel = deriveAutoSuffixLabel(msg.topicLabel, picked.instance)
+            // Prefer an explicit label for the auto-suffixed key if the user
+            // set one (via /telegram-topics:configure topic "Name" --instance N).
+            // Fall back to deriving `${baseLabel} (#N)` from whatever the shim
+            // sent. The shim can't know which slot it'll land in, so this
+            // enrichment has to happen daemon-side.
+            const labelsMap = loadLabels(STATE_DIR)
+            effectiveLabel = labelsMap[effectivePath]
+              ?? deriveAutoSuffixLabel(msg.topicLabel, picked.instance)
             autoSuffix = picked.instance
           }
         }

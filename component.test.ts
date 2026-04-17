@@ -574,6 +574,84 @@ describe('auto-suffix', () => {
     }
   }, LONG_TIMEOUT)
 
+  test('labels.json entry for ${cwd}#N overrides the derived auto-suffix label', async () => {
+    // Regression for the gap where the daemon auto-suffixed to #2 but
+    // ignored the user's manually-set labels["${cwd}#2"] entry and used
+    // the derived "${base} (#2)" instead.
+    const proj = '/tmp/proj-explicit-label'
+    const dir = trackDir(seedStateDir({
+      projects: [
+        { path: proj, topicId: 1001, topicName: 'proj-label' },
+        { path: `${proj}#2`, topicId: 1002, topicName: 'platform ops agent' },
+      ],
+    }))
+    // Seed labels.json with explicit names for both the bare path and #2.
+    writeFileSync(
+      join(dir, 'labels.json'),
+      JSON.stringify({
+        [proj]: 'app modules',
+        [`${proj}#2`]: 'platform ops agent',
+      }),
+    )
+
+    track(spawnDaemon(dir))
+    const sock = await waitForSocket(dir, 10_000)
+
+    // Primary session registers first.
+    const primary = await Client.connect(sock)
+    primary.send({ type: 'register', projectPath: proj, topicLabel: 'app modules' })
+    await primary.await(m => m.type === 'registered', 8000)
+
+    // Secondary registers with the SAME base label — daemon should pick #2
+    // and consult labels.json, not derive from the bare label.
+    const secondary = await Client.connect(sock)
+    secondary.send({ type: 'register', projectPath: proj, topicLabel: 'app modules' })
+    const r = await secondary.await(m => m.type === 'registered', 8000) as {
+      type: 'registered'; topicId: number; topicName: string; autoSuffix?: number
+    }
+    expect(r.autoSuffix).toBe(2)
+    expect(r.topicId).toBe(1002)
+    // Key assertion: used the labels.json entry, not the derived default.
+    expect(r.topicName).toBe('platform ops agent')
+
+    primary.close()
+    secondary.close()
+  }, LONG_TIMEOUT)
+
+  test('auto-suffix label falls back to derived when labels.json has no override', async () => {
+    // Companion test: when no labels entry exists for the #N key, the
+    // daemon uses deriveAutoSuffixLabel(shimLabel, N) as before.
+    const proj = '/tmp/proj-derived-label'
+    const dir = trackDir(seedStateDir({
+      projects: [
+        { path: proj, topicId: 1101, topicName: 'proj-derived' },
+        { path: `${proj}#2`, topicId: 1102, topicName: 'app modules (#2)' },
+      ],
+    }))
+    writeFileSync(
+      join(dir, 'labels.json'),
+      JSON.stringify({ [proj]: 'app modules' }),
+    )
+
+    track(spawnDaemon(dir))
+    const sock = await waitForSocket(dir, 10_000)
+
+    const primary = await Client.connect(sock)
+    primary.send({ type: 'register', projectPath: proj, topicLabel: 'app modules' })
+    await primary.await(m => m.type === 'registered', 8000)
+
+    const secondary = await Client.connect(sock)
+    secondary.send({ type: 'register', projectPath: proj, topicLabel: 'app modules' })
+    const r = await secondary.await(m => m.type === 'registered', 8000) as {
+      type: 'registered'; topicId: number; topicName: string; autoSuffix?: number
+    }
+    expect(r.autoSuffix).toBe(2)
+    expect(r.topicName).toBe('app modules (#2)')
+
+    primary.close()
+    secondary.close()
+  }, LONG_TIMEOUT)
+
   test('named instance does not participate in integer numbering', async () => {
     const proj = '/tmp/proj-named'
     const dir = trackDir(seedStateDir({
