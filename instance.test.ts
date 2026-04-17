@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { deriveAutoSuffixLabel, parseInstanceSuffix, pickAutoInstance } from './instance'
+import { deriveAutoSuffixLabel, parseInstanceSuffix, pickAutoInstance, resolveRenameTargetPath } from './instance'
 
 describe('parseInstanceSuffix', () => {
   test('returns 1 for the bare basePath', () => {
@@ -94,5 +94,36 @@ describe('deriveAutoSuffixLabel', () => {
   test('appends (#N) for instance 2+', () => {
     expect(deriveAutoSuffixLabel('My Project', 2)).toBe('My Project (#2)')
     expect(deriveAutoSuffixLabel('proj-a', 7)).toBe('proj-a (#7)')
+  })
+})
+
+describe('resolveRenameTargetPath', () => {
+  test('no instance override: uses shim\'s own registered path', () => {
+    // Primary shim: myProjectPath === cwd, no override → renames primary
+    expect(resolveRenameTargetPath('/a/b', '/a/b', undefined)).toBe('/a/b')
+    // Auto-suffixed shim: myProjectPath !== cwd, no override → renames own slot
+    expect(resolveRenameTargetPath('/a/b', '/a/b#2', undefined)).toBe('/a/b#2')
+    // Named-instance shim: renames its own named slot
+    expect(resolveRenameTargetPath('/a/b', '/a/b#exp', undefined)).toBe('/a/b#exp')
+  })
+
+  test('instance "1" targets the bare cwd regardless of shim\'s own path', () => {
+    // A #2 session can explicitly rename the primary by passing instance="1".
+    expect(resolveRenameTargetPath('/a/b', '/a/b#2', '1')).toBe('/a/b')
+  })
+
+  test('integer instance targets that numbered slot', () => {
+    expect(resolveRenameTargetPath('/a/b', '/a/b', '2')).toBe('/a/b#2')
+    expect(resolveRenameTargetPath('/a/b', '/a/b#2', '3')).toBe('/a/b#3')
+  })
+
+  test('named instance targets that named slot', () => {
+    expect(resolveRenameTargetPath('/a/b', '/a/b#2', 'exp')).toBe('/a/b#exp')
+  })
+
+  test('empty-string instance collapses to bare cwd', () => {
+    // Belt-and-suspenders against a caller passing instance=""
+    expect(resolveRenameTargetPath('/a/b', '/a/b#2', '')).toBe('/a/b')
+    expect(resolveRenameTargetPath('/a/b', '/a/b#2', '   ')).toBe('/a/b')
   })
 })

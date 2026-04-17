@@ -54,7 +54,7 @@ describe('protocol round-trip', () => {
     const originals: (ShimMessage | DaemonMessage)[] = [
       { type: 'register', projectPath: '/p', topicLabel: 'lbl' },
       { type: 'tool_call', callId: 'c1', tool: 'reply', args: { text: 'hi', files: ['/a.png'] } },
-      { type: 'registered', topicId: 42, topicName: 'n' },
+      { type: 'registered', topicId: 42, topicName: 'n', projectPath: '/p' },
       { type: 'inbound', content: 'hello world', meta: { user: 'a', user_id: '1' } },
       { type: 'tool_result', callId: 'c1', result: { content: [{ type: 'text', text: 'ok' }] } },
       { type: 'error', message: 'oh no' },
@@ -69,7 +69,7 @@ describe('protocol round-trip', () => {
 
   test('byte-at-a-time delivery reconstructs the full stream', () => {
     const msgs: DaemonMessage[] = [
-      { type: 'registered', topicId: 1, topicName: 'one' },
+      { type: 'registered', topicId: 1, topicName: 'one', projectPath: '/one' },
       { type: 'inbound', content: 'x'.repeat(200), meta: { k: 'v' } },
       { type: 'error', message: 'boom' },
     ]

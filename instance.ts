@@ -70,3 +70,28 @@ export function pickAutoInstance(
 export function deriveAutoSuffixLabel(baseLabel: string, instance: number): string {
   return instance === 1 ? baseLabel : `${baseLabel} (#${instance})`
 }
+
+/**
+ * Resolve the target projectPath for a rename initiated by a running shim.
+ *
+ * Without an explicit instance override, use the shim's own registered
+ * projectPath — so a session that the daemon auto-suffixed to `#2` renames
+ * its OWN topic, not the primary. This is the core invariant: the skill
+ * can't know the shim's effective path (cwd alone is ambiguous once auto-
+ * suffix is in play), so the decision has to route through the shim.
+ *
+ * With an explicit instance, compute `${cwd}#${instance}`. `"1"` (or an
+ * empty string) collapses to the bare cwd — the primary slot. Any other
+ * value is used verbatim as the suffix; the daemon-side rename handler is
+ * the final authority on whether that projectPath actually exists.
+ */
+export function resolveRenameTargetPath(
+  cwd: string,
+  myProjectPath: string,
+  instance: string | undefined,
+): string {
+  if (instance === undefined || instance === null) return myProjectPath
+  const trimmed = String(instance).trim()
+  if (trimmed === '' || trimmed === '1') return cwd
+  return `${cwd}#${trimmed}`
+}

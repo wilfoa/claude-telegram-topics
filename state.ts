@@ -85,10 +85,13 @@ export function saveTopics(topics: TopicMap, stateDir = DEFAULT_STATE_DIR): void
 
 // --- Labels (user-configured topic names) ---
 //
-// labels.json is written ONLY by the /telegram-topics:configure topic skill.
+// labels.json is written by the /telegram-topics:configure topic skill AND by
+// the shim's rename_topic MCP tool (which is now the default path for renames
+// initiated from a running session — the shim is the authority on which
+// projectPath "this session" refers to once auto-suffix is in play).
 // topics.json is written ONLY by the daemon (to track what Telegram has).
-// This separation prevents the skill from accidentally making the daemon think
-// a rename already happened (which would skip the actual editForumTopic call).
+// This separation prevents either writer from making the daemon think a rename
+// already happened, which would skip the actual editForumTopic call.
 
 export type LabelsMap = Record<string, string>
 

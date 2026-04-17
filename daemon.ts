@@ -483,6 +483,7 @@ async function handleShimMessage(shim: ShimSocket, msg: ShimMessage): Promise<vo
           type: 'registered',
           topicId: entry.topicId,
           topicName: entry.topicName,
+          projectPath: effectivePath,
           ...(autoSuffix !== undefined ? { autoSuffix } : {}),
         }
         sendToShim(shim, registered)

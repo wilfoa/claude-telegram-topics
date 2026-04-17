@@ -60,6 +60,15 @@ export type RegisteredMessage = {
   topicId: number
   topicName: string
   /**
+   * The effective projectPath the daemon registered this shim under. May
+   * differ from what the shim sent in `register` when the bare path was
+   * auto-suffixed (e.g. shim sent `/a/b`, daemon registered `/a/b#2`). The
+   * shim needs this to answer "which topic is mine?" for shim-initiated
+   * operations like rename_topic — cwd alone is ambiguous once auto-suffix
+   * is in play.
+   */
+  projectPath: string
+  /**
    * Set to the integer N (>=2) when the daemon auto-assigned a secondary
    * instance slot `${cwd}#${N}` because the shim registered a bare path and
    * another shim was already live on it. Absent when the shim got the bare

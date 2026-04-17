@@ -19,7 +19,7 @@ The repo is small and flat — every source file lives at the root. There are no
 | `gate.ts` | Inbound-message gate: policy enforcement, pairing code generation, permission-reply regex. Pure. |
 | `instance.ts` | Auto-suffix helpers (`parseInstanceSuffix`, `pickAutoInstance`, `deriveAutoSuffixLabel`). Pure. |
 | `remove-topic.ts` | Standalone helper invoked by the `project remove-confirm` skill to issue a remove over the daemon socket. |
-| `rename-topic.ts` | Standalone helper invoked by the `configure topic` skill to issue a live rename over the daemon socket. |
+| `rename-topic.ts` | Standalone helper for offline/cross-project renames. The default path from the `configure topic` skill is the shim's `rename_topic` MCP tool, which resolves the target using the shim's own registered projectPath. This helper is kept for renaming a topic whose session you aren't currently running. |
 | `skills/<name>/SKILL.md` | User-invocable slash commands. Markdown with YAML frontmatter (`name`, `description`, `user-invocable`, `allowed-tools`). Claude interprets the body. |
 | `*.test.ts` | Tests — see [Testing](#testing). |
 | `.claude-plugin/plugin.json` | Plugin manifest. Bump `version` with every feat/fix commit. |
@@ -81,6 +81,8 @@ Defined in `protocol.ts`. Newline-delimited JSON over a Unix socket. One message
 Shim → Daemon: `register`, `tool_call`, `permission_verdict`, `forward_permission_request`, `remove_topic`, `rename_topic`.
 Daemon → Shim: `registered`, `inbound`, `tool_result`, `permission_request`, `permission_verdict_forward`, `error`, `remove_topic_result`, `rename_topic_result`.
 
+`registered` carries the **effective `projectPath`** the daemon registered the shim under. This may differ from what the shim sent (auto-suffix can bump `/a/b` to `/a/b#2`). The shim must use this for any "my own topic" operation; cwd alone is ambiguous. Preserve this invariant — removing `projectPath` from `registered` would break the shim-side rename routing and reintroduce the "skill renames the wrong topic" bug.
+
 To add a message type:
 1. Add the type literal + fields in `protocol.ts`, include it in the `ShimMessage` or `DaemonMessage` union.
 2. Handle it in `daemon.ts → handleShimMessage` (for shim-originated) or in the shim's `handleDaemonMessage` (for daemon-originated).
@@ -98,7 +100,7 @@ Everything under `~/.claude/channels/telegram-topics/` (configurable via `TELEGR
 | `.env` | configure skill | daemon, shim |
 | `access.json` | access skill + daemon (for pairings and chatId capture) | — |
 | `topics.json` | daemon only (actual Telegram state) | skills, shim |
-| `labels.json` | configure skill only (user preferences) | daemon, shim |
+| `labels.json` | configure skill + shim's `rename_topic` MCP tool (user preferences) | daemon |
 | `daemon.lock` / `daemon.spawn.lock` | see Concurrency invariants | — |
 | `pending-removes/*.json` | project skill (request) + project skill (consume on confirm) | daemon, shim |
 

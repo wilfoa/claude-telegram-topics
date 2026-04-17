@@ -10,6 +10,8 @@ allowed-tools:
   - Bash(chmod *)
   - Bash(kill *)
   - Bash(bun *)
+  - mcp__telegram-topics__rename_topic
+  - mcp__plugin_telegram-topics_telegram-topics__rename_topic
 ---
 
 # /telegram-topics:configure — Channel Setup
@@ -110,34 +112,38 @@ Auto-suffix is the default behavior: the first bare-cwd session gets the primary
 
 ### `topic "<name>" [--instance <inst>]` — rename the topic (live, no restart needed)
 
-The user's preferred label lives in `labels.json` (never in `topics.json`, which is
-daemon-owned state). The skill updates `labels.json` for persistence **and** invokes the
-`rename-topic.ts` helper so the Telegram topic is renamed live — no session restart.
+The rename goes through the **shim's `rename_topic` MCP tool**, which targets this
+session's OWN registered topic. That matters for auto-suffixed sessions: if the
+daemon auto-suffixed this shim to `#2`, a rename with no `--instance` must target
+`${cwd}#2` — not the primary `${cwd}` topic that a different session holds. Using
+the MCP tool puts the shim (which knows its effective projectPath) in charge of
+that decision, instead of the skill guessing from `${cwd}`. The shim also
+persists the preferred label to `labels.json` for future sessions.
 
 Parse `$ARGUMENTS`:
 - The new name is a quoted or bare string (e.g. `topic "My Project"` or `topic proj`).
-- Optional flag `--instance <inst>` targets the named instance at `${cwd}#${inst}` instead of the bare cwd. `<inst>` is the same alphanumeric-dashes-underscores, 1–20 chars, NOT a pure integer.
-- No `--instance` flag → targets the bare cwd (the primary slot).
+- Optional flag `--instance <inst>`. Values:
+  - `1` → the bare cwd (primary slot).
+  - `2`, `3`, … → an integer auto-suffix slot `${cwd}#<n>`.
+  - Any other string (`foo`, `exp`, …) → a named instance `${cwd}#<name>`.
+  - Omit → the shim renames its own topic (whatever slot it was registered on).
 
 Steps:
 
-1. Validate the name: non-empty, ≤ 128 chars (Telegram's topic name cap). Reject if it contains control characters.
-2. Determine the target `projectPath`:
-   - If `--instance <inst>` was passed: `${cwd}#${inst}`.
-   - Else: `${cwd}`.
-3. Read `~/.claude/channels/telegram-topics/labels.json` (create `{}` if missing).
-4. Set `labels[projectPath] = "<name>"`. Write back with `chmod 600`.
-5. Invoke the rename helper:
-   ```bash
-   bun "${CLAUDE_PLUGIN_ROOT}/rename-topic.ts" "<projectPath>" "<name>"
-   ```
-   - Exit 0 → live rename succeeded (topic renamed in Telegram + `topics.json` updated). Confirm: "Topic renamed to '<name>'."
-   - Exit 0 with "daemon socket not found" on stderr → label saved to `labels.json`; it will apply on the next Claude Code session. Confirm: "Label saved; rename will apply on next session restart (daemon not currently running)."
-   - Exit non-zero → surface the helper's output/error; DO NOT revert `labels.json` since the user's preference is still valid for future sessions.
+1. Validate the name: non-empty, ≤ 128 chars (Telegram's topic name cap). Reject if it contains control characters. (The MCP tool also validates, but giving the user a helpful error before a tool call is nicer.)
+2. Call the shim's `rename_topic` MCP tool (tool name looks like `mcp__telegram-topics__rename_topic` — use whichever variant Claude Code surfaces):
+   - `name`: the new name (string).
+   - `instance`: the string passed to `--instance`, or omit the arg if no flag was given.
+3. Report the tool's result text to the user. On success it ends with `label also saved to labels.json`; on failure (Telegram error) the label is saved anyway so the preference applies on the next session.
 
 Notes:
-- The helper is safe to call even when the topic doesn't exist yet (unknown `projectPath` → exit 1 with "no topic registered"). In that case the label is still saved and will apply when the topic is first created on a future session.
-- `--instance <inst>` does **not** read the `TELEGRAM_TOPICS_INSTANCE` env var — if the user wants to rename the *current* named instance's topic, they pass `--instance <inst>` explicitly.
+- **No manual `labels.json` write from the skill.** The MCP tool handles persistence. Writing `labels.json` from the skill separately would race with the shim and create duplicate entries.
+- If the daemon isn't yet connected (e.g. the shim just launched and the socket connect is still in flight), the tool returns an error — retry after a moment.
+- To rename a topic for a project directory you are *not* currently running Claude Code in, use the standalone helper directly:
+  ```bash
+  bun "${CLAUDE_PLUGIN_ROOT}/rename-topic.ts" "/abs/path/to/project" "New Name"
+  ```
+  This path is strictly for admin/offline use — the MCP tool is the right default.
 
 ---
 

@@ -12,7 +12,7 @@ Unlike the official Telegram plugin — which funnels every Claude Code session 
 - **Concurrency-safe startup.** Simultaneous Claude Code sessions can't spawn duplicate daemons — an atomic lifetime lock on `daemon.lock` guarantees exactly one daemon per state dir, so you never hit the `409 Conflict` bot-token race. Shim-side `withSpawnLock` serializes spawn attempts on top of that.
 - **Parallel sessions in the same project.** Two Claude Code sessions in the same directory each get their own topic automatically: the first gets the primary, the second gets `${basename} (#2)`, the third gets `(#3)`, etc. Freed slots are reused. Set `TELEGRAM_TOPICS_INSTANCE=<name>` if you want a stable, human-chosen name instead of an integer.
 - **Remove topics safely.** `/telegram-topics:project remove <name>` deletes a topic from Telegram and clears local state — guarded by a two-step token confirmation.
-- **Rename topics live.** `/telegram-topics:configure topic "<name>"` renames the current project's topic immediately via `editForumTopic` — no session restart. Add `--instance <inst>` to target a named-instance topic.
+- **Rename topics live.** `/telegram-topics:configure topic "<name>"` renames the **calling session's own topic** immediately via `editForumTopic` — no session restart. Routed through the shim's `rename_topic` MCP tool so auto-suffixed sessions correctly rename their own topic (e.g. `${cwd}#2`), not whichever session currently holds the primary slot. Add `--instance <inst>` to target a different slot (`1` = primary, `2`/`3`/… = integer slot, any other string = named instance).
 - **Self-healing across updates.** When you `/plugin update`, the shim detects a stale daemon from the old cache path and restarts it.
 
 ## How it works
@@ -143,9 +143,16 @@ The default topic name is `basename(cwd)`. To override it:
 /telegram-topics:configure topic "General Dev"
 ```
 
-This writes the label to `labels.json` *and* calls `editForumTopic` immediately, so the rename takes effect without a session restart. If the daemon isn't running at the time, the label is still saved and applies on the next Claude Code session.
+This calls the shim's `rename_topic` MCP tool, which:
 
-To rename a named-instance topic (e.g. one created via `TELEGRAM_TOPICS_INSTANCE=exp`), pass `--instance exp`:
+1. Uses **this session's own registered projectPath** as the target — so a session auto-suffixed to `#2` renames `${cwd}#2`, not the primary `${cwd}` topic owned by a different session. Fixes the bug where running rename from an auto-suffixed session would silently rewrite whatever session happened to be holding the primary.
+2. Persists the preferred name to `labels.json` for future sessions.
+3. Calls `editForumTopic` to apply the rename in Telegram immediately.
+
+To rename a *different* slot from the current session, pass `--instance <inst>`:
+- `--instance 1` → the primary topic (`${cwd}`).
+- `--instance 2` (or `3`, `4`, …) → the integer auto-suffix slot at `${cwd}#<n>`.
+- `--instance exp` (or any non-integer string) → a named instance at `${cwd}#<name>` (e.g. `TELEGRAM_TOPICS_INSTANCE=exp`):
 
 ```
 /telegram-topics:configure topic "Exploratory" --instance exp
@@ -221,7 +228,7 @@ All under `~/.claude/channels/telegram-topics/`:
 | `.env` | configure skill | `CLAUDE_TELEGRAM_TOPICS_BOT_TOKEN=<token>` |
 | `access.json` | access skill + daemon | `chatId`, `dmPolicy`, `allowFrom[]`, `pending{}` |
 | `topics.json` | daemon only | `{ [projectPath]: { topicId, topicName } }` — actual Telegram state |
-| `labels.json` | configure skill only | `{ [projectPath]: label }` — user's preferred topic names |
+| `labels.json` | configure skill + shim's `rename_topic` MCP tool | `{ [projectPath]: label }` — user's preferred topic names |
 | `daemon.pid` | daemon | PID of the running daemon |
 | `daemon.sock` | daemon | Unix socket |
 | `daemon.lock` | daemon | Lifetime lock held exclusively by the running daemon; auto-removed on exit |
@@ -231,7 +238,7 @@ All under `~/.claude/channels/telegram-topics/`:
 | `pending-removes/` | project skill | `<token>.json` files for in-flight topic removal confirmations |
 | `inbox/` | daemon | Downloaded attachments |
 
-**Why two files for topics?** `topics.json` tracks what Telegram has (daemon-owned). `labels.json` tracks what the user wants (skill-owned). Keeping them separate means the skill can request a rename without making the daemon think the rename already happened.
+**Why two files for topics?** `topics.json` tracks what Telegram has (daemon-owned). `labels.json` tracks what the user wants (configure skill + shim). Keeping them separate means the writer of a rename request can persist the preference without making the daemon think the rename already happened.
 
 ## Inbound message format
 

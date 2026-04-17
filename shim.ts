@@ -29,11 +29,13 @@ import {
   type ShimMessage,
   type DaemonMessage,
   type ToolCallMessage,
+  type RenameTopicResultMessage,
   parseMessages,
   serialize,
 } from './protocol'
 
-import { loadLabels, loadTopics, readPid, writePid, clearPid, DEFAULT_STATE_DIR } from './state'
+import { loadLabels, saveLabels, loadTopics, readPid, writePid, clearPid, DEFAULT_STATE_DIR } from './state'
+import { resolveRenameTargetPath } from './instance'
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -174,6 +176,19 @@ const TOOLS = [
       required: ['message_id', 'text'],
     },
   },
+  {
+    name: 'rename_topic',
+    description:
+      "Rename this session's Telegram topic live (via editForumTopic) and persist the preferred label in labels.json. With no `instance`, renames THIS shim's own topic — correct for auto-suffixed sessions that must not clobber the primary. Pass `instance` to target a specific slot: `\"1\"` = primary (bare cwd), `\"2\"` / `\"3\"` / … = integer auto-suffix slot, any other string = named instance (`${cwd}#${instance}`).",
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        name: { type: 'string', description: 'New topic name (≤ 128 chars, no control characters).' },
+        instance: { type: 'string', description: 'Optional instance override. Omit to rename this shim\'s own topic.' },
+      },
+      required: ['name'],
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -206,6 +221,16 @@ function nextCallId(): string {
   return `shim-${process.pid}-${++callIdCounter}`
 }
 
+// Pending protocol-level calls (rename_topic, etc.) that don't use the
+// tool_call/tool_result envelope but still need request-response correlation.
+type PendingProtocolCall = {
+  resolve: (msg: DaemonMessage) => void
+  reject: (err: Error) => void
+  timer: ReturnType<typeof setTimeout>
+}
+const pendingProtocolCalls = new Map<string, PendingProtocolCall>()
+const PROTOCOL_CALL_TIMEOUT_MS = 15_000
+
 // ---------------------------------------------------------------------------
 // Daemon connection
 // ---------------------------------------------------------------------------
@@ -213,6 +238,11 @@ function nextCallId(): string {
 let daemonSocket: ReturnType<typeof Bun.connect<{ buffer: string }>> extends Promise<infer T> ? T : never
 let daemonConnected = false
 let registered = false
+// The effective projectPath the daemon registered this shim under. Set from
+// the `registered` response, which may return a different path than we sent
+// (e.g. auto-suffixed from `/a/b` to `/a/b#2`). Required for shim-initiated
+// operations that must target "my own topic" rather than a cwd-derived guess.
+let myProjectPath: string | undefined
 // Per-process (not per-connection) record of auto-suffix values we've already
 // surfaced to Claude Code. Prevents the notification from re-firing on every
 // reconnect — `registered` is reset on socket close, which would otherwise
@@ -254,11 +284,12 @@ function handleDaemonMessage(msg: DaemonMessage): void {
   switch (msg.type) {
     case 'registered': {
       registered = true
+      myProjectPath = msg.projectPath
       const suffix = msg.autoSuffix !== undefined
         ? ` [auto-assigned instance #${msg.autoSuffix} — another session was already on the primary slot; set TELEGRAM_TOPICS_INSTANCE to pin a stable name]`
         : ''
       process.stderr.write(
-        `telegram-topics shim: registered topic ${msg.topicName} (id: ${msg.topicId})${suffix}\n`,
+        `telegram-topics shim: registered topic ${msg.topicName} (id: ${msg.topicId}, path: ${msg.projectPath})${suffix}\n`,
       )
       // Surface auto-suffix assignment to Claude Code so the human sees it.
       // stderr is swallowed by the MCP harness; a channel notification
@@ -309,6 +340,16 @@ function handleDaemonMessage(msg: DaemonMessage): void {
         clearTimeout(pending.timer)
         pendingCalls.delete(msg.callId)
         pending.resolve(msg.result)
+      }
+      break
+    }
+
+    case 'rename_topic_result': {
+      const pending = pendingProtocolCalls.get(msg.callId)
+      if (pending) {
+        clearTimeout(pending.timer)
+        pendingProtocolCalls.delete(msg.callId)
+        pending.resolve(msg)
       }
       break
     }
@@ -645,11 +686,16 @@ async function connectToDaemon(): Promise<void> {
           process.stderr.write(`telegram-topics shim: daemon connection closed\n`)
 
           // Reject all pending calls
-          for (const [callId, pending] of pendingCalls) {
+          for (const [, pending] of pendingCalls) {
             clearTimeout(pending.timer)
             pending.reject(new Error('daemon connection lost'))
           }
           pendingCalls.clear()
+          for (const [, pending] of pendingProtocolCalls) {
+            clearTimeout(pending.timer)
+            pending.reject(new Error('daemon connection lost'))
+          }
+          pendingProtocolCalls.clear()
 
           // Reconnect unless shutting down
           if (!shuttingDown) {
@@ -686,6 +732,95 @@ async function connectToDaemon(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Tool call delegation
 // ---------------------------------------------------------------------------
+
+/**
+ * Rename the target topic by sending `rename_topic` over the socket and
+ * writing the preferred label to labels.json. Target resolution is the
+ * whole point of this path being shim-initiated rather than skill-initiated:
+ * without `instance`, we use `myProjectPath` (so auto-suffixed sessions
+ * rename their OWN topic, not the primary).
+ *
+ * labels.json is persisted BEFORE the Telegram API call so an offline/
+ * failed rename still records the user's preference for the next session.
+ * A Telegram-side failure returns isError=true, but labels.json is left
+ * intact — the preference is valid regardless of whether editForumTopic
+ * happened to succeed this run.
+ */
+async function renameTopic(
+  args: Record<string, unknown>,
+): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
+  const newName = typeof args.name === 'string' ? args.name.trim() : ''
+  if (!newName) {
+    return {
+      content: [{ type: 'text', text: 'rename_topic: `name` is required and must be non-empty' }],
+      isError: true,
+    }
+  }
+  if (newName.length > 128) {
+    return {
+      content: [{ type: 'text', text: 'rename_topic: `name` exceeds Telegram\'s 128-char topic name limit' }],
+      isError: true,
+    }
+  }
+  if (/[\x00-\x1f]/.test(newName)) {
+    return {
+      content: [{ type: 'text', text: 'rename_topic: `name` must not contain control characters' }],
+      isError: true,
+    }
+  }
+
+  if (!registered || !myProjectPath) {
+    return {
+      content: [{ type: 'text', text: 'rename_topic: shim has not completed registration with the daemon yet' }],
+      isError: true,
+    }
+  }
+
+  const instanceArg = typeof args.instance === 'string' ? args.instance : undefined
+  const targetPath = resolveRenameTargetPath(process.cwd(), myProjectPath, instanceArg)
+
+  try {
+    const labels = loadLabels(STATE_DIR)
+    labels[targetPath] = newName
+    saveLabels(labels, STATE_DIR)
+  } catch (err) {
+    process.stderr.write(`telegram-topics shim: failed to persist label: ${err}\n`)
+  }
+
+  const callId = nextCallId()
+  const resultMsg = await new Promise<RenameTopicResultMessage>((resolve, reject) => {
+    if (!daemonConnected) {
+      reject(new Error('not connected to daemon'))
+      return
+    }
+    const timer = setTimeout(() => {
+      pendingProtocolCalls.delete(callId)
+      reject(new Error(`rename_topic timed out after ${PROTOCOL_CALL_TIMEOUT_MS}ms`))
+    }, PROTOCOL_CALL_TIMEOUT_MS)
+    pendingProtocolCalls.set(callId, {
+      resolve: (m) => resolve(m as RenameTopicResultMessage),
+      reject,
+      timer,
+    })
+    try {
+      sendToDaemon({ type: 'rename_topic', callId, projectPath: targetPath, newName })
+    } catch (err) {
+      clearTimeout(timer)
+      pendingProtocolCalls.delete(callId)
+      reject(err as Error)
+    }
+  })
+
+  return {
+    content: [{
+      type: 'text',
+      text: resultMsg.ok
+        ? `${resultMsg.message} (path: ${targetPath}) — label also saved to labels.json`
+        : `${resultMsg.message} (path: ${targetPath}) — label saved to labels.json for future sessions`,
+    }],
+    isError: !resultMsg.ok,
+  }
+}
 
 function delegateToolCall(
   tool: string,
@@ -760,6 +895,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   try {
+    if (name === 'rename_topic') {
+      return await renameTopic((args ?? {}) as Record<string, unknown>)
+    }
     const result = await delegateToolCall(name, (args ?? {}) as Record<string, unknown>)
     return result
   } catch (err) {

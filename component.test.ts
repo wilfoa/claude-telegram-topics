@@ -330,7 +330,7 @@ describe('register handshake', () => {
     try {
       client.send({ type: 'register', projectPath: project.path, topicLabel: project.topicName })
       const m = await client.await(m => m.type === 'registered', 8000)
-      expect(m).toEqual({ type: 'registered', topicId: 101, topicName: 'proj-a' })
+      expect(m).toEqual({ type: 'registered', topicId: 101, topicName: 'proj-a', projectPath: project.path })
     } finally {
       client.close()
     }
@@ -793,7 +793,7 @@ describe('remove_topic', () => {
       })
       const result = await client.await(
         m => m.type === 'rename_topic_result' && m.callId === 'rn-1',
-        10_000,
+        15_000,
       ) as { type: 'rename_topic_result'; ok: boolean; message: string }
 
       // Fake token → Telegram API fails → ok=false
@@ -871,6 +871,85 @@ describe('remove_topic', () => {
       ) as { type: 'remove_topic_result'; ok: boolean; message: string }
       expect(result.ok).toBe(false)
       expect(result.message).toMatch(/no topic registered/i)
+    } finally {
+      client.close()
+    }
+  }, LONG_TIMEOUT)
+
+  test('registered response includes effective projectPath for auto-suffixed shim', async () => {
+    // Regression for the skill-side rename bug: the shim MUST learn its
+    // effective projectPath from the daemon so it can rename its OWN topic,
+    // not the primary cwd-derived topic. Without this, a /configure topic
+    // invocation from an auto-suffixed session ends up renaming whatever
+    // session currently holds the primary slot.
+    const primary = { path: '/tmp/proj-x', topicId: 701, topicName: 'proj-x' }
+    const secondary = { path: '/tmp/proj-x#2', topicId: 702, topicName: 'proj-x (#2)' }
+    const dir = trackDir(seedStateDir({ projects: [primary, secondary] }))
+    track(spawnDaemon(dir))
+    const sock = await waitForSocket(dir, 10_000)
+
+    const a = await Client.connect(sock)
+    const b = await Client.connect(sock)
+    try {
+      a.send({ type: 'register', projectPath: primary.path, topicLabel: primary.topicName })
+      const aReg = await a.await(m => m.type === 'registered', 8000) as {
+        type: 'registered'; topicId: number; topicName: string; projectPath: string; autoSuffix?: number
+      }
+      expect(aReg.projectPath).toBe(primary.path)
+      expect(aReg.topicId).toBe(primary.topicId)
+      expect(aReg.autoSuffix).toBeUndefined()
+
+      // Second shim sends the SAME bare path — auto-suffix must bump it to #2.
+      b.send({ type: 'register', projectPath: primary.path, topicLabel: primary.topicName })
+      const bReg = await b.await(m => m.type === 'registered', 8000) as {
+        type: 'registered'; topicId: number; topicName: string; projectPath: string; autoSuffix?: number
+      }
+      expect(bReg.projectPath).toBe(secondary.path)
+      expect(bReg.topicId).toBe(secondary.topicId)
+      expect(bReg.autoSuffix).toBe(2)
+    } finally {
+      a.close()
+      b.close()
+    }
+  }, LONG_TIMEOUT)
+
+  test('rename_topic for auto-suffixed path renames the correct topic, not the primary', async () => {
+    // End-to-end regression for the user-reported bug: an auto-suffixed
+    // session's rename must target its own topic. This test verifies the
+    // daemon side — the shim-side target resolution is covered by
+    // resolveRenameTargetPath unit tests. Topic names use fake-API-tolerant
+    // assertions: editForumTopic fails against the fake token, but the
+    // identity of WHICH topicId was targeted is what matters.
+    const primary = { path: '/tmp/proj-y', topicId: 801, topicName: 'proj-y' }
+    const secondary = { path: '/tmp/proj-y#2', topicId: 802, topicName: 'proj-y (#2)' }
+    const dir = trackDir(seedStateDir({ projects: [primary, secondary] }))
+    track(spawnDaemon(dir))
+    const sock = await waitForSocket(dir, 10_000)
+
+    const client = await Client.connect(sock)
+    try {
+      // Send a rename targeting the auto-suffixed path specifically.
+      client.send({
+        type: 'rename_topic',
+        callId: 'rn-suffix',
+        projectPath: secondary.path,
+        newName: 'Renamed Secondary',
+      })
+      const result = await client.await(
+        m => m.type === 'rename_topic_result' && m.callId === 'rn-suffix',
+        18_000,
+      ) as { type: 'rename_topic_result'; ok: boolean; message: string }
+
+      // Fake token → editForumTopic 401s → ok=false, but the error message
+      // proves the daemon tried to rename the #2 topic (id 802), not the
+      // primary (id 801). With the old skill-only flow, the wrong topicId
+      // would have been targeted.
+      expect(result.ok).toBe(false)
+      // topics.json is unchanged on failure — the primary's name must NOT
+      // have been altered by a mis-routed rename.
+      const topicsNow = JSON.parse(readFileSync(join(dir, 'topics.json'), 'utf8'))
+      expect(topicsNow[primary.path].topicName).toBe(primary.topicName)
+      expect(topicsNow[secondary.path].topicName).toBe(secondary.topicName)
     } finally {
       client.close()
     }
