@@ -20,7 +20,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
-import { readFileSync, existsSync } from 'fs'
+import { readFileSync, existsSync, openSync, writeSync, closeSync, unlinkSync } from 'fs'
 import { join, basename, dirname } from 'path'
 import { homedir } from 'os'
 import { spawn } from 'child_process'
@@ -433,22 +433,87 @@ async function waitForSocket(timeoutMs = 5000, intervalMs = 100): Promise<void> 
   throw new Error(`daemon socket did not appear within ${timeoutMs}ms`)
 }
 
-async function ensureDaemon(): Promise<void> {
-  // Scan for any telegram-topics daemons on the system and kill any that
-  // aren't the one we expect. This is the only way to recover from leftover
-  // daemons from older plugin-cache versions or a local dev checkout — they
-  // all poll the same bot token and cause tight 409-Conflict loops otherwise.
-  const keepPid = await killStrayDaemons()
+const SPAWN_LOCK_PATH = join(STATE_DIR, 'daemon.spawn.lock')
 
-  if (keepPid != null && isPidAlive(keepPid) && existsSync(SOCKET_PATH)) {
-    return
+/**
+ * Serialize the daemon-spawn critical section across concurrent shims.
+ *
+ * Without a lock, two shims starting simultaneously both observe "no daemon
+ * running" and both call spawnDaemon(). The two daemons then race on
+ * Telegram's getUpdates long-poll (one consumer per bot token), producing a
+ * 409-Conflict loop that eventually kills one of them and orphans its shim.
+ *
+ * We use openSync with O_CREAT|O_EXCL (mode "wx") as a portable advisory
+ * lock: exactly one caller creates the file, the rest get EEXIST and poll.
+ * If the lock-holder died without cleanup, the PID in the file is dead, and
+ * any waiter steals the lock.
+ */
+export async function withSpawnLock<T>(
+  lockPath: string,
+  fn: () => Promise<T>,
+  opts: { timeoutMs?: number; pollMs?: number; isAlive?: (pid: number) => boolean } = {},
+): Promise<T> {
+  const timeoutMs = opts.timeoutMs ?? 10_000
+  const pollMs = opts.pollMs ?? 50
+  const pidAlive = opts.isAlive ?? isPidAlive
+  const deadline = Date.now() + timeoutMs
+  let fd: number | null = null
+  while (true) {
+    try {
+      fd = openSync(lockPath, 'wx')
+      writeSync(fd, String(process.pid))
+      break
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code
+      if (code !== 'EEXIST') throw e
+      // Stale-lock recovery: if the PID in the file isn't alive, steal it.
+      try {
+        const owner = parseInt(readFileSync(lockPath, 'utf8').trim(), 10)
+        if (owner && !pidAlive(owner)) {
+          try { unlinkSync(lockPath) } catch {}
+          continue
+        }
+      } catch {
+        // File vanished between check and read — retry immediately.
+        continue
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`could not acquire daemon spawn lock at ${lockPath} within ${timeoutMs}ms`)
+      }
+      await new Promise(r => setTimeout(r, pollMs))
+    }
   }
-  // Matching daemon exists but socket is gone — kill it too and spawn fresh.
-  if (keepPid != null) {
-    await killStaleDaemon(keepPid)
+  try {
+    return await fn()
+  } finally {
+    try { closeSync(fd!) } catch {}
+    try { unlinkSync(lockPath) } catch {}
   }
-  spawnDaemon()
-  await waitForSocket()
+}
+
+async function ensureDaemon(): Promise<void> {
+  return withSpawnLock(SPAWN_LOCK_PATH, async () => {
+    // Scan for any telegram-topics daemons on the system and kill any that
+    // aren't the one we expect. This is the only way to recover from leftover
+    // daemons from older plugin-cache versions or a local dev checkout — they
+    // all poll the same bot token and cause tight 409-Conflict loops otherwise.
+    const keepPid = await killStrayDaemons()
+
+    if (keepPid != null && isPidAlive(keepPid) && existsSync(SOCKET_PATH)) {
+      return
+    }
+    // Matching daemon exists but socket is gone — kill it too and spawn fresh.
+    if (keepPid != null) {
+      await killStaleDaemon(keepPid)
+    }
+    // Re-check after acquiring the lock: a sibling shim may have already
+    // spawned a fresh daemon while we were waiting.
+    if (existsSync(SOCKET_PATH)) {
+      return
+    }
+    spawnDaemon()
+    await waitForSocket()
+  })
 }
 
 // ---------------------------------------------------------------------------

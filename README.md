@@ -241,13 +241,40 @@ You can — but **use a different bot token for each**. Telegram allows only one
 
 ## Development
 
-Tests (protocol parser, state management, gate logic):
+### Automated tests
 
 ```bash
 bun test
 ```
 
-The plugin has no integration tests — exercise it end-to-end against a real bot and supergroup.
+Split across layers:
+
+| Layer | File(s) | What's covered |
+|-------|---------|----------------|
+| Unit | `protocol.test.ts`, `state.test.ts`, `gate.test.ts`, `shim.test.ts` | Pure helpers: message parser, JSON state round-trips, gate policy, spawn-lock semantics, daemon-process selection heuristics |
+| Integration | `protocol.test.ts` (round-trip block) | Serialize + parseMessages under fragmented delivery, 1 MB payloads, embedded newlines, unicode, malformed frames |
+| Component | `component.test.ts` | Real daemon child processes against a scratch state dir: self-guard, dangling-socket cleanup, register handshake, same-project eviction, multi-project isolation, disconnect cleanup, clean restart |
+
+Component tests pre-seed `topics.json` so the daemon never calls Telegram — the grammy poller logs 401s harmlessly while the Unix-socket side under test runs normally.
+
+### Manual end-to-end
+
+The full loop (grammy polling, forum-topic creation, attachment download, permission relay) can't run in CI because it needs a real bot and a supergroup. After a change that might affect wire behavior, run the checklist below against a throwaway bot + test supergroup.
+
+Setup (once): create a bot via `@BotFather`, create a supergroup with Topics on, add the bot as admin, save the token/chatId via `/telegram-topics:configure`.
+
+Checklist:
+
+1. **Fresh topic creation** — `cd` into a new project dir, launch Claude Code with the channel flag. A topic appears in the supergroup with the directory basename. `topics.json` is updated.
+2. **Pairing flow** — send any message in the new topic from an unpaired account. Bot replies with a 6-char code. `/telegram-topics:pair <code>` in Claude Code. Next message is delivered to the session (verify by asking Claude something and getting a reply).
+3. **Reply / react / edit / download** — exercise each tool from Claude once. Reply threading (`reply_to`), emoji reactions, editing a prior bot message, downloading a photo sent from Telegram.
+4. **Permission relay** — ask Claude to run a command that needs approval (e.g., `bash: rm /tmp/x`). A "🔐 Permission" message with Allow/Deny buttons posts to the topic. Tap Allow — Claude proceeds. Repeat with Deny.
+5. **Multi-project isolation** — open a second Claude Code session in a different directory. Confirm a second topic is created and messages to topic A only reach session A.
+6. **Concurrency (regression for the 409 race)** — start two Claude Code sessions *simultaneously* in two different project dirs (e.g., via two terminals run back-to-back). Watch `daemon.log` — should see `shim connected (total: 1)`, `shim connected (total: 2)` with no `409 Conflict` and no `Exiting` lines. Only one daemon PID should appear in `ps | grep daemon.ts`.
+7. **Daemon restart** — `/telegram-topics:daemon stop`. The next message to any topic should auto-spawn a new daemon via the connected shims (watch for `listening on ...` in the log). Existing sessions reconnect without the user intervening.
+8. **Two-session same-project** — launch two Claude Code sessions in the *same* directory. The newer one wins the topic; messages only reach it. Exit the newer one, restart the older one — it re-registers and starts receiving again. (Without restart, the older one stays deaf by design.)
+
+If any of these break, it's a regression the automated suite didn't catch — consider adding a component test.
 
 ## Repository
 

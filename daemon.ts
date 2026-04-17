@@ -16,7 +16,7 @@
 
 import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, realpathSync, existsSync, unlinkSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, realpathSync, existsSync, unlinkSync, openSync, writeSync, closeSync } from 'fs'
 import { join, extname, sep } from 'path'
 
 import {
@@ -94,6 +94,66 @@ process.on('uncaughtException', err => {
 // ---------------------------------------------------------------------------
 
 mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
+
+// ---------------------------------------------------------------------------
+// Lifetime lock — at most one daemon per state dir, enforced atomically.
+//
+// `openSync(path, 'wx')` is atomic on POSIX: if two processes both call it,
+// exactly one succeeds and the other gets EEXIST. We hold the fd for the
+// entire daemon lifetime and release it on exit. On stale-lock recovery
+// (holder PID is dead), any waiter steals.
+// ---------------------------------------------------------------------------
+
+const LOCK_PATH = join(STATE_DIR, 'daemon.lock')
+
+function isPidAliveSync(pid: number): boolean {
+  try { process.kill(pid, 0); return true } catch { return false }
+}
+
+let lockFd: number = -1
+for (let attempt = 0; attempt < 5; attempt++) {
+  try {
+    lockFd = openSync(LOCK_PATH, 'wx')
+    writeSync(lockFd, String(process.pid))
+    break
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code !== 'EEXIST') throw err
+    let heldPid = 0
+    try {
+      heldPid = parseInt(readFileSync(LOCK_PATH, 'utf8').trim(), 10) || 0
+    } catch {
+      // Lockfile vanished — retry.
+      continue
+    }
+    if (heldPid && isPidAliveSync(heldPid)) {
+      process.stderr.write(
+        `telegram-topics daemon: another daemon (pid ${heldPid}) holds ${LOCK_PATH}, exiting\n`,
+      )
+      process.exit(0)
+    }
+    // Holder dead — steal.
+    try { unlinkSync(LOCK_PATH) } catch {}
+  }
+}
+if (lockFd < 0) {
+  process.stderr.write(`telegram-topics daemon: failed to acquire ${LOCK_PATH} after retries, exiting\n`)
+  process.exit(1)
+}
+
+// Clean up lock and socket on any exit path (normal, signal, or uncaught).
+function releaseLock(): void {
+  try { closeSync(lockFd) } catch {}
+  try { unlinkSync(LOCK_PATH) } catch {}
+}
+process.on('exit', releaseLock)
+
+// The lock guarantees no other daemon is polling. Any socket file left
+// behind is dangling — unlink it so our Bun.listen can bind fresh.
+if (existsSync(SOCKET_PATH)) {
+  try { unlinkSync(SOCKET_PATH) } catch {}
+}
+
 writePid(process.pid, STATE_DIR)
 
 let shuttingDown = false
@@ -828,67 +888,67 @@ function cleanupSocket(): void {
   try { unlinkSync(SOCKET_PATH) } catch {}
 }
 
-// Clean up stale socket
-cleanupSocket()
 mkdirSync(join(STATE_DIR), { recursive: true, mode: 0o700 })
-
-const socketServer = Bun.listen<{ buffer: string }>({
-  unix: SOCKET_PATH,
-  socket: {
-    open(socket) {
-      socket.data = { buffer: '' }
-      const shim: ShimSocket = { socket, topicId: null, projectPath: null }
-      connectedShims.add(shim)
-      // Store the shim reference on the socket data for lookup in other handlers.
-      // Bun socket data is typed as { buffer: string }, but we stash extra info
-      // via a side Map.
-      shimBySocket.set(socket, shim)
-      resetIdleTimer()
-      process.stderr.write(`telegram-topics daemon: shim connected (total: ${connectedShims.size})\n`)
-    },
-
-    data(socket, data) {
-      const raw = typeof data === 'string' ? data : Buffer.from(data).toString('utf8')
-      socket.data.buffer += raw
-
-      const { messages, remainder } = parseMessages<ShimMessage>(socket.data.buffer)
-      socket.data.buffer = remainder
-
-      const shim = shimBySocket.get(socket)
-      if (!shim) return
-
-      for (const msg of messages) {
-        void handleShimMessage(shim, msg).catch(err => {
-          process.stderr.write(`telegram-topics daemon: shim message handler error: ${err}\n`)
-          sendToShim(shim, { type: 'error', message: `internal error: ${err}` })
-        })
-      }
-    },
-
-    close(socket) {
-      const shim = shimBySocket.get(socket)
-      if (shim) {
-        if (shim.topicId != null) {
-          shimsByTopic.delete(shim.topicId)
-        }
-        connectedShims.delete(shim)
-        shimBySocket.delete(socket)
-        process.stderr.write(`telegram-topics daemon: shim disconnected (total: ${connectedShims.size})\n`)
-        if (connectedShims.size === 0) {
-          startIdleTimer()
-        }
-      }
-    },
-
-    error(socket, error) {
-      process.stderr.write(`telegram-topics daemon: socket error: ${error}\n`)
-    },
-  },
-})
 
 // Side map: Bun socket -> ShimSocket (Bun's socket.data is typed and we
 // can't add arbitrary fields without changing the generic param).
 const shimBySocket = new Map<import('bun').Socket<{ buffer: string }>, ShimSocket>()
+
+const socketHandlers = {
+  open(socket: import('bun').Socket<{ buffer: string }>) {
+    socket.data = { buffer: '' }
+    const shim: ShimSocket = { socket, topicId: null, projectPath: null }
+    connectedShims.add(shim)
+    // Store the shim reference on the socket data for lookup in other handlers.
+    // Bun socket data is typed as { buffer: string }, but we stash extra info
+    // via a side Map.
+    shimBySocket.set(socket, shim)
+    resetIdleTimer()
+    process.stderr.write(`telegram-topics daemon: shim connected (total: ${connectedShims.size})\n`)
+  },
+
+  data(socket: import('bun').Socket<{ buffer: string }>, data: Buffer | string) {
+    const raw = typeof data === 'string' ? data : Buffer.from(data).toString('utf8')
+    socket.data.buffer += raw
+
+    const { messages, remainder } = parseMessages<ShimMessage>(socket.data.buffer)
+    socket.data.buffer = remainder
+
+    const shim = shimBySocket.get(socket)
+    if (!shim) return
+
+    for (const msg of messages) {
+      void handleShimMessage(shim, msg).catch(err => {
+        process.stderr.write(`telegram-topics daemon: shim message handler error: ${err}\n`)
+        sendToShim(shim, { type: 'error', message: `internal error: ${err}` })
+      })
+    }
+  },
+
+  close(socket: import('bun').Socket<{ buffer: string }>) {
+    const shim = shimBySocket.get(socket)
+    if (shim) {
+      if (shim.topicId != null) {
+        shimsByTopic.delete(shim.topicId)
+      }
+      connectedShims.delete(shim)
+      shimBySocket.delete(socket)
+      process.stderr.write(`telegram-topics daemon: shim disconnected (total: ${connectedShims.size})\n`)
+      if (connectedShims.size === 0) {
+        startIdleTimer()
+      }
+    }
+  },
+
+  error(_socket: import('bun').Socket<{ buffer: string }>, error: Error) {
+    process.stderr.write(`telegram-topics daemon: socket error: ${error}\n`)
+  },
+}
+
+// The lifetime lock (acquired at module top) already guarantees we're the
+// only daemon. If bind still fails it's a real filesystem problem — let it
+// propagate.
+const socketServer = Bun.listen<{ buffer: string }>({ unix: SOCKET_PATH, socket: socketHandlers })
 
 process.stderr.write(`telegram-topics daemon: listening on ${SOCKET_PATH}\n`)
 

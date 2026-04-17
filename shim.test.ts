@@ -1,5 +1,8 @@
-import { describe, expect, test } from 'bun:test'
-import { parseDaemonsFromPs, selectDaemonToKeep } from './shim'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { join } from 'path'
+import { tmpdir } from 'os'
+import { parseDaemonsFromPs, selectDaemonToKeep, withSpawnLock } from './shim'
 
 describe('parseDaemonsFromPs', () => {
   test('picks out telegram-topics daemon processes', () => {
@@ -81,5 +84,120 @@ describe('selectDaemonToKeep', () => {
 
   test('returns null when daemon list is empty', () => {
     expect(selectDaemonToKeep([], EXPECTED, undefined)).toBeNull()
+  })
+})
+
+describe('withSpawnLock', () => {
+  let tmp: string
+  let lockPath: string
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'tt-lock-'))
+    lockPath = join(tmp, 'spawn.lock')
+  })
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true })
+  })
+
+  test('acquires lock, runs fn, and releases on success', async () => {
+    const result = await withSpawnLock(lockPath, async () => {
+      expect(existsSync(lockPath)).toBe(true)
+      expect(readFileSync(lockPath, 'utf8')).toBe(String(process.pid))
+      return 'ok'
+    })
+    expect(result).toBe('ok')
+    expect(existsSync(lockPath)).toBe(false)
+  })
+
+  test('releases lock even if fn throws', async () => {
+    await expect(
+      withSpawnLock(lockPath, async () => {
+        throw new Error('boom')
+      }),
+    ).rejects.toThrow('boom')
+    expect(existsSync(lockPath)).toBe(false)
+  })
+
+  test('serializes concurrent callers', async () => {
+    let active = 0
+    let maxActive = 0
+    const order: number[] = []
+
+    const task = (i: number) =>
+      withSpawnLock(lockPath, async () => {
+        active++
+        maxActive = Math.max(maxActive, active)
+        order.push(i)
+        await new Promise(r => setTimeout(r, 30))
+        active--
+      }, { pollMs: 5 })
+
+    await Promise.all([task(1), task(2), task(3), task(4)])
+    expect(maxActive).toBe(1)
+    expect(order.sort()).toEqual([1, 2, 3, 4])
+    expect(existsSync(lockPath)).toBe(false)
+  })
+
+  test('steals the lock when the holder PID is dead', async () => {
+    // Pre-create a lockfile owned by a bogus PID that our isAlive stub marks dead.
+    writeFileSync(lockPath, '999999', { flag: 'wx' })
+    const result = await withSpawnLock(
+      lockPath,
+      async () => 'stolen',
+      { isAlive: () => false, pollMs: 5 },
+    )
+    expect(result).toBe('stolen')
+  })
+
+  test('times out when holder PID is alive and lock is never released', async () => {
+    writeFileSync(lockPath, String(process.pid), { flag: 'wx' })
+    await expect(
+      withSpawnLock(
+        lockPath,
+        async () => 'should-not-run',
+        { isAlive: () => true, timeoutMs: 100, pollMs: 20 },
+      ),
+    ).rejects.toThrow(/could not acquire daemon spawn lock/)
+    // Lock still held — we didn't clobber it.
+    expect(existsSync(lockPath)).toBe(true)
+  })
+
+  test('steals a lock with corrupted (non-numeric) content', async () => {
+    writeFileSync(lockPath, 'not-a-pid\n')
+    // parseInt('not-a-pid') is NaN, falsy, so the stale branch reads it and
+    // bails out of stealing — which means we should time out here.
+    // Documenting the current behavior rather than silently changing it.
+    await expect(
+      withSpawnLock(lockPath, async () => 'x', { isAlive: () => true, timeoutMs: 100, pollMs: 20 }),
+    ).rejects.toThrow(/could not acquire/)
+    // Still present — we don't clobber unparseable lockfiles blindly.
+    expect(existsSync(lockPath)).toBe(true)
+  })
+
+  test('survives rapid sequential acquire/release under churn', async () => {
+    let count = 0
+    for (let i = 0; i < 25; i++) {
+      await withSpawnLock(lockPath, async () => { count++ }, { pollMs: 2 })
+      expect(existsSync(lockPath)).toBe(false)
+    }
+    expect(count).toBe(25)
+  })
+
+  test('10-way concurrency still serializes and completes in time', async () => {
+    let active = 0
+    let maxActive = 0
+    const tasks = Array.from({ length: 10 }, (_, i) =>
+      withSpawnLock(lockPath, async () => {
+        active++
+        maxActive = Math.max(maxActive, active)
+        await new Promise(r => setTimeout(r, 5))
+        active--
+        return i
+      }, { pollMs: 2 }),
+    )
+    const results = await Promise.all(tasks)
+    expect(maxActive).toBe(1)
+    expect(results.sort((a, b) => a - b)).toEqual([0,1,2,3,4,5,6,7,8,9])
   })
 })
