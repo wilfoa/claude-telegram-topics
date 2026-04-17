@@ -213,6 +213,11 @@ function nextCallId(): string {
 let daemonSocket: ReturnType<typeof Bun.connect<{ buffer: string }>> extends Promise<infer T> ? T : never
 let daemonConnected = false
 let registered = false
+// Per-process (not per-connection) record of auto-suffix values we've already
+// surfaced to Claude Code. Prevents the notification from re-firing on every
+// reconnect — `registered` is reset on socket close, which would otherwise
+// make every reconnect look like a fresh assignment.
+const notifiedAutoSuffixes = new Set<number>()
 
 function sendToDaemon(msg: ShimMessage): void {
   if (!daemonConnected || !daemonSocket) {
@@ -224,7 +229,6 @@ function sendToDaemon(msg: ShimMessage): void {
 function handleDaemonMessage(msg: DaemonMessage): void {
   switch (msg.type) {
     case 'registered': {
-      const wasAlreadyRegistered = registered
       registered = true
       const suffix = msg.autoSuffix !== undefined
         ? ` [auto-assigned instance #${msg.autoSuffix} — another session was already on the primary slot; set TELEGRAM_TOPICS_INSTANCE to pin a stable name]`
@@ -232,11 +236,13 @@ function handleDaemonMessage(msg: DaemonMessage): void {
       process.stderr.write(
         `telegram-topics shim: registered topic ${msg.topicName} (id: ${msg.topicId})${suffix}\n`,
       )
-      // On first register for an auto-suffixed slot, surface it to Claude
-      // Code so the human actually sees they got slotted to an instance.
+      // Surface auto-suffix assignment to Claude Code so the human sees it.
       // stderr is swallowed by the MCP harness; a channel notification
-      // reaches the conversation.
-      if (!wasAlreadyRegistered && msg.autoSuffix !== undefined) {
+      // reaches the conversation. We emit at most once per unique suffix
+      // value per shim process — `registered` is reset on socket close, so
+      // keying on it would re-fire every reconnect.
+      if (msg.autoSuffix !== undefined && !notifiedAutoSuffixes.has(msg.autoSuffix)) {
+        notifiedAutoSuffixes.add(msg.autoSuffix)
         server.notification({
           method: 'notifications/claude/channel',
           params: {
