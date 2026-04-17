@@ -17,6 +17,7 @@ The repo is small and flat — every source file lives at the root. There are no
 | `protocol.ts` | Message types + parser/serializer for the shim↔daemon wire format. Pure helpers only. |
 | `state.ts` | JSON read/write for `.env`, `access.json`, `topics.json`, `labels.json`, `daemon.pid`. Pure I/O. |
 | `gate.ts` | Inbound-message gate: policy enforcement, pairing code generation, permission-reply regex. Pure. |
+| `instance.ts` | Auto-suffix helpers (`parseInstanceSuffix`, `pickAutoInstance`, `deriveAutoSuffixLabel`). Pure. |
 | `remove-topic.ts` | Standalone helper invoked by the `project remove-confirm` skill to issue a remove over the daemon socket. |
 | `skills/<name>/SKILL.md` | User-invocable slash commands. Markdown with YAML frontmatter (`name`, `description`, `user-invocable`, `allowed-tools`). Claude interprets the body. |
 | `*.test.ts` | Tests — see [Testing](#testing). |
@@ -67,6 +68,10 @@ Three layers enforce it:
 3. **`shim.ts` post-acquire re-check.** After getting the spawn lock, re-check `existsSync(SOCKET_PATH)` before spawning — a sibling shim may have already spawned while we waited.
 
 If you're tempted to replace any of these with probe-then-act, stop. Probes have race windows that concurrent spawns will hit. Atomic `wx` is the primitive; use it.
+
+### Auto-suffix contract
+
+The daemon's `register` handler routes bare-cwd registrations through `pickAutoInstance` (`instance.ts`). Invariant: given the set of live `projectPath`s held by connected shims, a bare registration gets the lowest unused integer slot (1 = bare cwd, N>=2 = `${cwd}#${N}`). Freed slots are reused; named instances (`#foo`) never participate in integer counting. Eviction only fires on *explicit* collisions (two shims both sending the same `#foo` or `#N` path) — "explicit wins over auto." If you change the register flow, preserve this contract; the auto-suffix component tests assert it directly.
 
 ## Socket protocol
 

@@ -225,8 +225,11 @@ function handleDaemonMessage(msg: DaemonMessage): void {
   switch (msg.type) {
     case 'registered': {
       registered = true
+      const suffix = msg.autoSuffix !== undefined
+        ? ` [auto-assigned instance #${msg.autoSuffix} — another session was already on the primary slot; set TELEGRAM_TOPICS_INSTANCE to pin a stable name]`
+        : ''
       process.stderr.write(
-        `telegram-topics shim: registered topic ${msg.topicName} (id: ${msg.topicId})\n`,
+        `telegram-topics shim: registered topic ${msg.topicName} (id: ${msg.topicId})${suffix}\n`,
       )
       break
     }

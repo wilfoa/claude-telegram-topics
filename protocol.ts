@@ -51,6 +51,13 @@ export type RegisteredMessage = {
   type: 'registered'
   topicId: number
   topicName: string
+  /**
+   * Set to the integer N (>=2) when the daemon auto-assigned a secondary
+   * instance slot `${cwd}#${N}` because the shim registered a bare path and
+   * another shim was already live on it. Absent when the shim got the bare
+   * path, or when it registered an explicit named instance like `#foo`.
+   */
+  autoSuffix?: number
 }
 
 export type InboundMessage = {

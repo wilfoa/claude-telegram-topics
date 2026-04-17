@@ -46,6 +46,7 @@ import {
 } from './state'
 
 import { gate, pruneExpired, PERMISSION_REPLY_RE } from './gate'
+import { deriveAutoSuffixLabel, pickAutoInstance } from './instance'
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -378,24 +379,50 @@ async function handleShimMessage(shim: ShimSocket, msg: ShimMessage): Promise<vo
   switch (msg.type) {
     case 'register': {
       try {
-        const entry = await ensureTopic(msg.projectPath, msg.topicLabel)
-        shim.topicId = entry.topicId
-        shim.projectPath = msg.projectPath
+        // Auto-assign an instance slot if the shim registered a bare cwd
+        // (no `#` suffix at all). If another shim is already live on that
+        // bare path, the new shim gets `${cwd}#2` (or the next free integer).
+        // Named instances (shim passed `#foo`) skip this and register as-is —
+        // they evict any prior holder of that exact path, matching the
+        // documented "explicit wins" contract.
+        let effectivePath = msg.projectPath
+        let effectiveLabel = msg.topicLabel
+        let autoSuffix: number | undefined
+        if (!msg.projectPath.includes('#')) {
+          const live: string[] = []
+          for (const s of connectedShims) {
+            if (s === shim) continue
+            if (s.projectPath) live.push(s.projectPath)
+          }
+          const picked = pickAutoInstance(msg.projectPath, live)
+          effectivePath = picked.effectivePath
+          if (picked.instance !== 1) {
+            effectiveLabel = deriveAutoSuffixLabel(msg.topicLabel, picked.instance)
+            autoSuffix = picked.instance
+          }
+        }
 
-        // Evict previous shim for this topic if any
+        const entry = await ensureTopic(effectivePath, effectiveLabel)
+        shim.topicId = entry.topicId
+        shim.projectPath = effectivePath
+
+        // Evict previous shim for this topic if any. For auto-suffixed slots
+        // this should only fire for explicit env-var collisions; the picker
+        // above already skips live integer slots.
         const prev = shimsByTopic.get(entry.topicId)
         if (prev && prev !== shim) {
           sendToShim(prev, { type: 'error', message: 'replaced by new session' })
         }
 
         shimsByTopic.set(entry.topicId, shim)
-        topicToProject.set(entry.topicId, msg.projectPath)
+        topicToProject.set(entry.topicId, effectivePath)
         resetIdleTimer()
 
         const registered: RegisteredMessage = {
           type: 'registered',
           topicId: entry.topicId,
           topicName: entry.topicName,
+          ...(autoSuffix !== undefined ? { autoSuffix } : {}),
         }
         sendToShim(shim, registered)
       } catch (err) {

@@ -74,20 +74,33 @@ PER-PROJECT SETUP  (each new project directory)
         prompts all thread back to the same topic.
 
 ====================================================================
-RUNNING TWO CLAUDE CODE SESSIONS IN THE SAME PROJECT
+RUNNING MULTIPLE CLAUDE CODE SESSIONS IN THE SAME PROJECT
 ====================================================================
 
-Two sessions in the same directory compete for one topic — the newer
-one wins and the older one stays connected but stops receiving
-inbound Telegram messages. To run a parallel second session with its
-own independent topic, set TELEGRAM_TOPICS_INSTANCE on launch:
+The default is auto-suffix: the first session in a directory gets
+the primary topic, the second is auto-routed to "<cwd>#2" with a
+topic named "<baseLabel> (#2)", the third to "(#3)", etc. No eviction
+required, no env var required. Freed slots are reused before new
+integers are allocated.
+
+For a stable, human-chosen name instead of an integer, set
+TELEGRAM_TOPICS_INSTANCE on launch:
 
     TELEGRAM_TOPICS_INSTANCE=exp claude \
       --dangerously-load-development-channels \
       plugin:telegram-topics@wilfoa-plugins
 
-It registers as "<basename> (exp)" under key "<cwd>#exp". No eviction.
-Run /telegram-topics:configure instance <name> to get this recipe.
+Registers as "<baseLabel> (exp)" under "<cwd>#exp". Named instances
+don't participate in integer numbering — two unnamed sessions plus a
+"#exp" session still land on slots 1, 2, and exp (not 1, 2, 3).
+
+Run /telegram-topics:configure instance <name> for the launch recipe,
+or /telegram-topics:configure instance (no name) to list named +
+integer instances currently in topics.json for the cwd.
+
+Eviction only fires if you EXPLICITLY collide on the same named or
+integer-suffixed instance (e.g. two shells both setting
+TELEGRAM_TOPICS_INSTANCE=exp). "Explicit wins over auto."
 
 ====================================================================
 REMOVING A TOPIC

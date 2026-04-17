@@ -10,7 +10,7 @@ Unlike the official Telegram plugin — which funnels every Claude Code session 
 - **Same capabilities as the official Telegram plugin.** Reply, react, download attachments, edit messages, permission relay, sender allowlists, pairing flow.
 - **Auto-managed daemon.** A single long-lived process owns the bot and serves all local Claude Code sessions over a Unix socket. Auto-starts on first session, idles out after the last one disconnects.
 - **Concurrency-safe startup.** Simultaneous Claude Code sessions can't spawn duplicate daemons — an atomic lifetime lock on `daemon.lock` guarantees exactly one daemon per state dir, so you never hit the `409 Conflict` bot-token race. Shim-side `withSpawnLock` serializes spawn attempts on top of that.
-- **Named instances.** Set `TELEGRAM_TOPICS_INSTANCE=<name>` to run a second Claude Code session in the same directory with its own independent topic (no eviction).
+- **Parallel sessions in the same project.** Two Claude Code sessions in the same directory each get their own topic automatically: the first gets the primary, the second gets `${basename} (#2)`, the third gets `(#3)`, etc. Freed slots are reused. Set `TELEGRAM_TOPICS_INSTANCE=<name>` if you want a stable, human-chosen name instead of an integer.
 - **Remove topics safely.** `/telegram-topics:project remove <name>` deletes a topic from Telegram and clears local state — guarded by a two-step token confirmation.
 - **Self-healing across updates.** When you `/plugin update`, the shim detects a stale daemon from the old cache path and restarts it.
 
@@ -146,15 +146,21 @@ This writes to `~/.claude/channels/telegram-topics/labels.json`. On the next Cla
 
 #### Running multiple Claude Code sessions in the same project
 
-Two sessions in the same directory normally compete for one topic — the newer one evicts the older (last-writer-wins). To run a genuinely parallel second session with its own topic, set `TELEGRAM_TOPICS_INSTANCE`:
+Auto-suffix handles this by default. The first session in a project directory gets the primary topic (named from the directory basename or whatever you configured). Any concurrent session launched in the same directory is automatically routed to `${cwd}#2`, then `${cwd}#3`, etc. — each with its own topic named `${baseLabel} (#N)`. No eviction, no lost messages, no action required from you.
+
+Freed slots are reused: if `#2` exits and a new session starts, that new session claims `#2` again rather than jumping to `#4`. This keeps the topic count bounded at the peak concurrency you actually use. Topics persist in `topics.json` (and in Telegram) until you explicitly remove them.
+
+**Named instances** (optional). To pin a stable, human-chosen name instead of an integer, set `TELEGRAM_TOPICS_INSTANCE` on launch:
 
 ```bash
 TELEGRAM_TOPICS_INSTANCE=exp claude --dangerously-load-development-channels plugin:telegram-topics@wilfoa-plugins
 ```
 
-The shim registers under `${cwd}#exp` and creates a topic named `${basename} (exp)` (or `${your-label} (exp)` if you've set a custom label). The original session's topic is untouched. Names must match `[a-z0-9-_]{1,20}`.
+The shim registers under `${cwd}#exp` and gets a topic named `${baseLabel} (exp)`. Named instances do not participate in integer auto-suffix numbering — `${cwd}#exp` being live does not cause a later auto session to skip to `#3`. Name must match `[a-z0-9-_]{1,20}`.
 
-Run `/telegram-topics:configure instance` (no name) inside a session to list any instance topics already registered for the current project, or `/telegram-topics:configure instance <name>` to get the copy-pasteable launch recipe.
+Run `/telegram-topics:configure instance` (no name) inside a session to list named + integer instances registered for the current project. `/telegram-topics:configure instance <name>` prints the copy-pasteable launch recipe for a named instance.
+
+If you *explicitly* launch two sessions with the same `TELEGRAM_TOPICS_INSTANCE=foo` (or two sessions with the same integer-suffixed path), the second still evicts the first — "explicit wins over auto" is the contract. That's the only way to hit the deaf-older-session state anymore.
 
 #### Removing a topic
 

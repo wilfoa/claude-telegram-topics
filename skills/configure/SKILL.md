@@ -84,24 +84,28 @@ Delete the `CLAUDE_TELEGRAM_TOPICS_BOT_TOKEN=` line from `.env`.
 4. Write back.
 5. Note: "Chat ID changes need a daemon restart."
 
-### `instance <name>` — run a second Claude Code session in the same project, with its own topic
+### `instance [<name>]` — list or plan a secondary session in the same project
 
-The plugin keys topics by `projectPath`. Two Claude Code sessions in the same directory therefore compete for the same topic, and the newer one evicts the older (see README "Two-session same-project"). To run a genuine second instance with its own independent topic, launch Claude Code with `TELEGRAM_TOPICS_INSTANCE` set.
+Auto-suffix is the default behavior: the first bare-cwd session gets the primary topic, the second is auto-assigned `${cwd}#2`, etc. This dispatch is **only** useful when you want a stable, human-chosen name (`TELEGRAM_TOPICS_INSTANCE=exp`) instead of an integer. It does not persist anything — the env var is a per-shell concept.
 
-This dispatch does **not** persist anything — it only prints the launch recipe, since the env var is a per-shell concept. If `$ARGUMENTS` is `instance` (no name), list currently-registered instance topics for the cwd and reprint the recipe.
-
-1. Read `$ARGUMENTS`. Parse off the leading `instance ` prefix; treat the remainder as `<name>`. If the remainder is empty:
-   - Read `topics.json` and list entries whose key starts with `${cwd}#`. Show the instance names and topic IDs.
-   - Print the launch recipe (step 3 below) with `<name>` as a placeholder.
-2. If `<name>` is given, validate: lowercase alphanumerics + dashes/underscores, 1–20 chars. Reject anything else — it becomes part of the topic name that Telegram has to accept.
-3. Print, verbatim:
-   > Start the secondary session from a fresh terminal in this directory:
+1. Read `$ARGUMENTS`. Parse off the leading `instance ` prefix; treat the remainder as `<name>`.
+2. If the remainder is empty:
+   - Read `topics.json` and list entries whose key starts with `${cwd}#`. Group them:
+     - **Named** (suffix does not match `^[1-9]\d*$`): show suffix and topicId.
+     - **Integer (auto-suffix)** (suffix matches): show as `#N` with topicId.
+   - Mention which of these are currently held by an active shim if that info is easily derivable, otherwise just list them from `topics.json`.
+   - Then print the launch recipe (step 4) with `<name>` as a placeholder, noting the env var is only needed for *named* instances.
+3. If `<name>` is given, validate: lowercase alphanumerics + dashes/underscores, 1–20 chars, and must NOT match `^[1-9]\d*$` (pure integers are reserved for auto-suffix). Reject anything else.
+4. Print, verbatim:
+   > If you just need a second session, just launch Claude Code normally in the same directory — you'll automatically get a `(#2)` topic. This command is for when you want a *stable named* instance instead:
+   >
    > ```
    > TELEGRAM_TOPICS_INSTANCE=<name> claude --dangerously-load-development-channels plugin:telegram-topics@wilfoa-plugins
    > ```
-   > On first connect it will create a new topic named `<basename-of-cwd> (<name>)` (or `<label-from-configure-topic> (<name>)` if you've set a custom label for this project). Your other session's topic is untouched.
    >
-   > To remove the instance topic later, run `/telegram-topics:project remove <basename-of-cwd> (<name>)` (or use the full `<cwd>#<name>` path).
+   > Registers as `<baseLabel> (<name>)` under `<cwd>#<name>`. Named instances don't consume integer slots — your other sessions keep their auto-assigned numbers.
+   >
+   > To remove the named topic later: `/telegram-topics:project remove <cwd>#<name>`.
 
 ### `topic <name>` — set topic name for current project
 

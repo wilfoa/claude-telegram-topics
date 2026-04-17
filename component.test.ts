@@ -359,9 +359,13 @@ describe('register handshake', () => {
 // Same-project eviction (last-writer-wins)
 // ---------------------------------------------------------------------------
 
-describe('same-project eviction', () => {
-  test('second register for the same project evicts the first with "replaced by new session"', async () => {
-    const project = { path: '/tmp/proj-evict', topicId: 202, topicName: 'proj-evict' }
+describe('same-instance eviction', () => {
+  test('two shims registering the same explicit named instance: second evicts the first', async () => {
+    // Eviction is still the contract for *explicit* instance collisions.
+    // Bare cwd now auto-suffixes (see the `auto-suffix` block above), so only
+    // explicit `#foo` or `#N` collisions can still evict — this is the
+    // "explicit wins" contract for TELEGRAM_TOPICS_INSTANCE.
+    const project = { path: '/tmp/proj-evict#exp', topicId: 202, topicName: 'proj-evict (exp)' }
     const dir = trackDir(seedStateDir({ projects: [project] }))
     track(spawnDaemon(dir))
     const sock = await waitForSocket(dir, 10_000)
@@ -379,7 +383,7 @@ describe('same-project eviction', () => {
       ])
       expect(evictMsg.type).toBe('error')
       expect(secondRegistered.type).toBe('registered')
-      // First shim's socket is NOT closed — it's alive but deaf. Matches real behavior.
+      // First shim's socket stays open — alive but deaf. Matches real behavior.
       expect(first.closed).toBe(false)
     } finally {
       first.close()
@@ -476,6 +480,137 @@ describe('daemon restart', () => {
     const b = track(spawnDaemon(dir))
     await waitForSocket(dir, 10_000)
     expect(b.exitCode).toBeNull()
+  }, LONG_TIMEOUT)
+})
+
+// ---------------------------------------------------------------------------
+// Auto-suffix — bare-cwd registrations from multiple shims get distinct
+// integer slots (1 = bare, 2 = cwd#2, etc.) instead of evicting each other.
+// Dead slots get reused before new slots are allocated.
+// ---------------------------------------------------------------------------
+
+describe('auto-suffix', () => {
+  test('three concurrent shims on same bare cwd land on slots 1, 2, 3 without eviction', async () => {
+    const proj = '/tmp/proj-auto'
+    const dir = trackDir(seedStateDir({
+      projects: [
+        { path: proj, topicId: 701, topicName: 'proj-auto' },
+        { path: `${proj}#2`, topicId: 702, topicName: 'proj-auto (#2)' },
+        { path: `${proj}#3`, topicId: 703, topicName: 'proj-auto (#3)' },
+      ],
+    }))
+    track(spawnDaemon(dir))
+    const sock = await waitForSocket(dir, 10_000)
+
+    // Sequentially register so the second and third see a live peer.
+    const c1 = await Client.connect(sock)
+    c1.send({ type: 'register', projectPath: proj, topicLabel: 'proj-auto' })
+    const r1 = await c1.await(m => m.type === 'registered', 8000) as { type: 'registered'; topicId: number; autoSuffix?: number }
+    expect(r1.topicId).toBe(701)
+    expect(r1.autoSuffix).toBeUndefined() // primary slot — no auto-suffix marker
+
+    const c2 = await Client.connect(sock)
+    c2.send({ type: 'register', projectPath: proj, topicLabel: 'proj-auto' })
+    const r2 = await c2.await(m => m.type === 'registered', 8000) as { type: 'registered'; topicId: number; autoSuffix?: number }
+    expect(r2.topicId).toBe(702)
+    expect(r2.autoSuffix).toBe(2)
+
+    const c3 = await Client.connect(sock)
+    c3.send({ type: 'register', projectPath: proj, topicLabel: 'proj-auto' })
+    const r3 = await c3.await(m => m.type === 'registered', 8000) as { type: 'registered'; topicId: number; autoSuffix?: number }
+    expect(r3.topicId).toBe(703)
+    expect(r3.autoSuffix).toBe(3)
+
+    // None of them should have received an eviction error.
+    await new Promise(r => setTimeout(r, 200))
+    for (const c of [c1, c2, c3]) {
+      expect(c.inbox.filter(m => m.type === 'error')).toEqual([])
+    }
+
+    c1.close()
+    c2.close()
+    c3.close()
+  }, LONG_TIMEOUT)
+
+  test('a freed middle slot is reused by the next registration', async () => {
+    const proj = '/tmp/proj-reuse'
+    const dir = trackDir(seedStateDir({
+      projects: [
+        { path: proj, topicId: 801, topicName: 'proj-reuse' },
+        { path: `${proj}#2`, topicId: 802, topicName: 'proj-reuse (#2)' },
+        { path: `${proj}#3`, topicId: 803, topicName: 'proj-reuse (#3)' },
+      ],
+    }))
+    track(spawnDaemon(dir))
+    const sock = await waitForSocket(dir, 10_000)
+
+    const c1 = await Client.connect(sock)
+    c1.send({ type: 'register', projectPath: proj, topicLabel: 'proj-reuse' })
+    await c1.await(m => m.type === 'registered', 8000)
+
+    const c2 = await Client.connect(sock)
+    c2.send({ type: 'register', projectPath: proj, topicLabel: 'proj-reuse' })
+    await c2.await(m => m.type === 'registered', 8000)
+
+    const c3 = await Client.connect(sock)
+    c3.send({ type: 'register', projectPath: proj, topicLabel: 'proj-reuse' })
+    await c3.await(m => m.type === 'registered', 8000)
+
+    // Drop c2 (occupant of #2). Wait for the daemon to process the close.
+    c2.close()
+    await new Promise(r => setTimeout(r, 200))
+
+    // Fourth shim registers → should claim #2, not jump to #4.
+    const c4 = await Client.connect(sock)
+    try {
+      c4.send({ type: 'register', projectPath: proj, topicLabel: 'proj-reuse' })
+      const r4 = await c4.await(m => m.type === 'registered', 8000) as { type: 'registered'; topicId: number; autoSuffix?: number }
+      expect(r4.topicId).toBe(802)
+      expect(r4.autoSuffix).toBe(2)
+    } finally {
+      c1.close()
+      c3.close()
+      c4.close()
+    }
+  }, LONG_TIMEOUT)
+
+  test('named instance does not participate in integer numbering', async () => {
+    const proj = '/tmp/proj-named'
+    const dir = trackDir(seedStateDir({
+      projects: [
+        { path: proj, topicId: 901, topicName: 'proj-named' },
+        { path: `${proj}#foo`, topicId: 950, topicName: 'proj-named (foo)' },
+        { path: `${proj}#2`, topicId: 902, topicName: 'proj-named (#2)' },
+      ],
+    }))
+    track(spawnDaemon(dir))
+    const sock = await waitForSocket(dir, 10_000)
+
+    // Named instance registers first — via explicit path.
+    const named = await Client.connect(sock)
+    named.send({ type: 'register', projectPath: `${proj}#foo`, topicLabel: 'proj-named (foo)' })
+    const rNamed = await named.await(m => m.type === 'registered', 8000) as { type: 'registered'; topicId: number; autoSuffix?: number }
+    expect(rNamed.topicId).toBe(950)
+    expect(rNamed.autoSuffix).toBeUndefined() // explicit named, not auto-suffixed
+
+    // Bare registers — should get the primary (slot 1), NOT skip to #2 because
+    // of the named instance.
+    const primary = await Client.connect(sock)
+    primary.send({ type: 'register', projectPath: proj, topicLabel: 'proj-named' })
+    const rPrim = await primary.await(m => m.type === 'registered', 8000) as { type: 'registered'; topicId: number; autoSuffix?: number }
+    expect(rPrim.topicId).toBe(901)
+    expect(rPrim.autoSuffix).toBeUndefined()
+
+    // Next bare registers — should get #2 (skipping #foo), not #3.
+    const second = await Client.connect(sock)
+    second.send({ type: 'register', projectPath: proj, topicLabel: 'proj-named' })
+    const rSec = await second.await(m => m.type === 'registered', 8000) as { type: 'registered'; topicId: number; autoSuffix?: number }
+    expect(rSec.topicId).toBe(902)
+    expect(rSec.autoSuffix).toBe(2)
+
+    named.close()
+    primary.close()
+    second.close()
   }, LONG_TIMEOUT)
 })
 
