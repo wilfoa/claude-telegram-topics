@@ -282,7 +282,7 @@ Another process is polling the same bot token. Usually a stale daemon (fixed aut
 Also check for the official Telegram plugin using the same token (it shouldn't — each plugin needs its own bot).
 
 **Topic name doesn't match what I set.**
-The rename happens when a shim reconnects. Exit Claude Code and restart the session — the daemon will call `editForumTopic` to apply the new name.
+`/telegram-topics:configure topic "<name>"` writes the preferred label to `labels.json` *and* invokes `editForumTopic` live — no session restart needed. If the daemon wasn't running at the time, the label is still saved and applies on the next session. Check `/telegram-topics:daemon status` and `cat ~/.claude/channels/telegram-topics/labels.json` to confirm the label is recorded.
 
 **Daemon doesn't start / socket never appears.**
 Check `~/.claude/channels/telegram-topics/daemon.log` for errors. Common causes: missing token, invalid chat ID (must be a negative supergroup ID), or the bot isn't actually in the group.
@@ -324,7 +324,9 @@ Checklist:
 5. **Multi-project isolation** — open a second Claude Code session in a different directory. Confirm a second topic is created and messages to topic A only reach session A.
 6. **Concurrency (regression for the 409 race)** — start two Claude Code sessions *simultaneously* in two different project dirs (e.g., via two terminals run back-to-back). Watch `daemon.log` — should see `shim connected (total: 1)`, `shim connected (total: 2)` with no `409 Conflict` and no `Exiting` lines. Only one daemon PID should appear in `ps | grep daemon.ts`.
 7. **Daemon restart** — `/telegram-topics:daemon stop`. The next message to any topic should auto-spawn a new daemon via the connected shims (watch for `listening on ...` in the log). Existing sessions reconnect without the user intervening.
-8. **Two-session same-project** — launch two Claude Code sessions in the *same* directory. The newer one wins the topic; messages only reach it. Exit the newer one, restart the older one — it re-registers and starts receiving again. (Without restart, the older one stays deaf by design.)
+8. **Two-session same-project auto-suffix** — launch two Claude Code sessions in the *same* directory, neither with `TELEGRAM_TOPICS_INSTANCE`. A second topic named `${basename} (#2)` appears. Messages to the primary topic reach only session 1; messages to `(#2)` reach only session 2. Exit session 2 and launch a third — it reuses slot `#2` rather than jumping to `#3`.
+9. **Explicit-collision eviction** — launch two sessions both with `TELEGRAM_TOPICS_INSTANCE=exp`. The second evicts the first; session 1 sees an `error` notification and goes deaf. This is the "explicit wins over auto" contract.
+10. **Live rename** — run `/telegram-topics:configure topic "New Name"` in an active session. The topic is renamed in Telegram immediately (no restart) and `topics.json` reflects the new name. Re-run with `--instance exp` against a named instance to verify that path too.
 
 If any of these break, it's a regression the automated suite didn't catch — consider adding a component test.
 
