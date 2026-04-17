@@ -224,6 +224,7 @@ function sendToDaemon(msg: ShimMessage): void {
 function handleDaemonMessage(msg: DaemonMessage): void {
   switch (msg.type) {
     case 'registered': {
+      const wasAlreadyRegistered = registered
       registered = true
       const suffix = msg.autoSuffix !== undefined
         ? ` [auto-assigned instance #${msg.autoSuffix} — another session was already on the primary slot; set TELEGRAM_TOPICS_INSTANCE to pin a stable name]`
@@ -231,6 +232,31 @@ function handleDaemonMessage(msg: DaemonMessage): void {
       process.stderr.write(
         `telegram-topics shim: registered topic ${msg.topicName} (id: ${msg.topicId})${suffix}\n`,
       )
+      // On first register for an auto-suffixed slot, surface it to Claude
+      // Code so the human actually sees they got slotted to an instance.
+      // stderr is swallowed by the MCP harness; a channel notification
+      // reaches the conversation.
+      if (!wasAlreadyRegistered && msg.autoSuffix !== undefined) {
+        server.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content:
+              `This Claude Code session was auto-assigned to instance #${msg.autoSuffix} ` +
+              `for this project directory (topic: "${msg.topicName}", id ${msg.topicId}) ` +
+              `because another session already holds the primary slot. ` +
+              `To pin a stable human-chosen name instead of an integer, relaunch this session with ` +
+              `TELEGRAM_TOPICS_INSTANCE=<name>.`,
+            meta: {
+              kind: 'auto_suffix',
+              instance: String(msg.autoSuffix),
+              topic_name: msg.topicName,
+              topic_id: String(msg.topicId),
+            },
+          },
+        }).catch(err => {
+          process.stderr.write(`telegram-topics shim: failed to send auto_suffix notification: ${err}\n`)
+        })
+      }
       break
     }
 
