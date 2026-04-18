@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join } from 'path'
 import { tmpdir } from 'os'
 import {
+  computeReconnectDelay,
   parseDaemonsFromPs,
   resolveProjectPath,
   resolveTopicLabelFor,
@@ -272,5 +273,26 @@ describe('resolveTopicLabelFor', () => {
         { '/a/foo#exp': { topicId: 2, topicName: 'Renamed Experimental' } },
       ),
     ).toBe('Renamed Experimental')
+  })
+})
+
+describe('computeReconnectDelay', () => {
+  test('first attempt is 1s (no zero-delay spam on immediate failure)', () => {
+    expect(computeReconnectDelay(1)).toBe(1000)
+  })
+
+  test('doubles through 16s, then caps at 30s', () => {
+    expect(computeReconnectDelay(2)).toBe(2000)
+    expect(computeReconnectDelay(3)).toBe(4000)
+    expect(computeReconnectDelay(4)).toBe(8000)
+    expect(computeReconnectDelay(5)).toBe(16_000)
+    expect(computeReconnectDelay(6)).toBe(30_000)
+  })
+
+  test('stays capped at 30s for long outages', () => {
+    // A daemon outage that lasts an hour shouldn't push the next retry
+    // beyond 30s — we need to notice recovery within a bounded delay.
+    expect(computeReconnectDelay(10)).toBe(30_000)
+    expect(computeReconnectDelay(100)).toBe(30_000)
   })
 })

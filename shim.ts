@@ -238,6 +238,14 @@ const PROTOCOL_CALL_TIMEOUT_MS = 15_000
 let daemonSocket: ReturnType<typeof Bun.connect<{ buffer: string }>> extends Promise<infer T> ? T : never
 let daemonConnected = false
 let registered = false
+// Reconnect loop state. A shim may lose its daemon connection for many
+// reasons — daemon idle-exit, daemon upgrade, a 409-forced restart, or a
+// stray-daemon kill by a sibling shim. We keep trying indefinitely until
+// the shim itself is asked to shut down. Exponential backoff caps at 30s
+// so a long outage doesn't spam. The counter resets to 0 on every
+// successful connect — see `connectToDaemon`.
+let reconnectAttempt = 0
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 // The effective projectPath the daemon registered this shim under. Set from
 // the `registered` response, which may return a different path than we sent
 // (e.g. auto-suffixed from `/a/b` to `/a/b#2`). Required for shim-initiated
@@ -640,6 +648,44 @@ async function ensureDaemon(): Promise<void> {
 // Connect to daemon socket
 // ---------------------------------------------------------------------------
 
+/**
+ * Schedule a reconnect to the daemon with exponential backoff.
+ *
+ * Never stops trying while the shim is alive. Caps the delay at 30s so a
+ * long daemon outage doesn't spam; resets to 0 on a successful connect.
+ * Idempotent — calling while a reconnect is already queued is a no-op so
+ * concurrent triggers (close handler + manual callers) don't double-book.
+ */
+export function computeReconnectDelay(attempt: number): number {
+  // attempts 1..6 → 1s, 2s, 4s, 8s, 16s, 30s (cap). Further attempts stay 30s.
+  const exp = Math.min(1000 * Math.pow(2, attempt - 1), 30_000)
+  return Math.max(1000, exp)
+}
+
+function scheduleReconnect(): void {
+  if (shuttingDown) return
+  if (reconnectTimer) return
+  reconnectAttempt++
+  const delay = computeReconnectDelay(reconnectAttempt)
+  process.stderr.write(
+    `telegram-topics shim: reconnect attempt ${reconnectAttempt} in ${delay / 1000}s\n`,
+  )
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null
+    if (shuttingDown) return
+    try {
+      await ensureDaemon()
+      await connectToDaemon()
+    } catch (err) {
+      process.stderr.write(
+        `telegram-topics shim: reconnect attempt ${reconnectAttempt} failed: ${err}\n`,
+      )
+      scheduleReconnect()
+    }
+  }, delay)
+  reconnectTimer.unref()
+}
+
 async function connectToDaemon(): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     let resolved = false
@@ -651,6 +697,7 @@ async function connectToDaemon(): Promise<void> {
           daemonSocket = socket
           daemonConnected = true
           socket.data = { buffer: '' }
+          reconnectAttempt = 0
           process.stderr.write(`telegram-topics shim: connected to daemon\n`)
 
           // Register with daemon
@@ -697,19 +744,7 @@ async function connectToDaemon(): Promise<void> {
           }
           pendingProtocolCalls.clear()
 
-          // Reconnect unless shutting down
-          if (!shuttingDown) {
-            process.stderr.write(`telegram-topics shim: reconnecting in 2s\n`)
-            setTimeout(async () => {
-              if (shuttingDown) return
-              try {
-                await ensureDaemon()
-                await connectToDaemon()
-              } catch (err) {
-                process.stderr.write(`telegram-topics shim: reconnect failed: ${err}\n`)
-              }
-            }, 2000)
-          }
+          if (!shuttingDown) scheduleReconnect()
         },
 
         error(socket, error) {
