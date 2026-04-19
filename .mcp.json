@@ -4,7 +4,7 @@
       "command": "bash",
       "args": [
         "-c",
-        "(cd \"${CLAUDE_PLUGIN_ROOT}\" && bun install --no-summary) >&2 && exec bun \"${CLAUDE_PLUGIN_ROOT}/shim.ts\""
+        ": \"${CLAUDE_PLUGIN_ROOT:?telegram-topics must be loaded via the plugin system (set --dangerously-load-development-channels plugin:telegram-topics@wilfoa-plugins) — do not invoke this .mcp.json directly}\" && (cd \"$CLAUDE_PLUGIN_ROOT\" && bun install --no-summary) >&2 && exec bun \"$CLAUDE_PLUGIN_ROOT/shim.ts\""
       ]
     }
   }
