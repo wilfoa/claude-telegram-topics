@@ -14,7 +14,7 @@
  *   - Relays permission requests/verdicts between Claude Code and daemon
  */
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js'
+import { Server } from '@modelcontextprotocol/sdk/server'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   CallToolRequestSchema,
@@ -911,7 +911,7 @@ const server = new Server(
       },
     },
     instructions: INSTRUCTIONS,
-  } as any,
+  },
 )
 
 // --- Tool handlers ---
