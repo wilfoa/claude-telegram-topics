@@ -635,6 +635,12 @@ async function ensureDaemon(): Promise<void> {
     // Matching daemon exists but socket is gone — kill it too and spawn fresh.
     if (keepPid != null) {
       await killStaleDaemon(keepPid)
+    } else if (existsSync(SOCKET_PATH)) {
+      // No daemon is running but a socket inode persists. SIGKILL/OOM leaves
+      // it behind — daemon's exit handler only unlinks daemon.lock. Without
+      // this, the re-check below misreads the stale inode as "a sibling
+      // already spawned" and returns, and connectToDaemon then fails.
+      removeSocketFile()
     }
     // Re-check after acquiring the lock: a sibling shim may have already
     // spawned a fresh daemon while we were waiting.
